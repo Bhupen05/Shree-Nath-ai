@@ -79,11 +79,11 @@ model Employee {
   createdAt           DateTime       @default(now()) @map("created_at")
   updatedAt           DateTime       @updatedAt @map("updated_at")
   employeeRoles       EmployeeRole[]
-  activityLogs        ActivityLog[]
-  billsCreated        Bill[]
-  paymentsReceived    BillPayment[]
-  stockEntriesAdded   StockEntry[]
-  stockLogsPerformed  StockLog[]
+  activityLogs        ActivityLog[]  @relation("EmployeeActivityLogs")
+  billsCreated        Bill[]         @relation("EmployeeCreatedBills")
+  paymentsReceived    BillPayment[]  @relation("EmployeeReceivedPayments")
+  stockEntriesAdded   StockEntry[]   @relation("EmployeeAddedStock")
+  stockLogsPerformed  StockLog[]     @relation("EmployeePerformedStockLogs")
 
   @@map("employees")
 }
@@ -191,7 +191,7 @@ model StockEntry {
   product       Product     @relation(fields: [productId], references: [id])
   location      Location    @relation(fields: [locationId], references: [id])
   supplier      Supplier?   @relation(fields: [supplierId], references: [id])
-  addedBy       Employee?   @relation(fields: [addedById], references: [id])
+  addedBy       Employee?   @relation("EmployeeAddedStock", fields: [addedById], references: [id])
   stockLogs     StockLog[]
   billItems     BillItem[]
 
@@ -212,7 +212,7 @@ model StockLog {
   createdAt      DateTime      @default(now()) @map("created_at")
   stockEntry     StockEntry    @relation(fields: [stockEntryId], references: [id])
   product        Product       @relation(fields: [productId], references: [id])
-  performedBy    Employee?     @relation(fields: [performedById], references: [id])
+  performedBy    Employee?     @relation("EmployeePerformedStockLogs", fields: [performedById], references: [id])
 
   @@map("stock_logs")
 }
@@ -252,7 +252,7 @@ model Bill {
   updatedAt    DateTime          @updatedAt @map("updated_at")
   customer     Customer?         @relation(fields: [customerId], references: [id])
   supplier     Supplier?         @relation(fields: [supplierId], references: [id])
-  createdBy    Employee?         @relation(fields: [createdById], references: [id])
+  createdBy    Employee?         @relation("EmployeeCreatedBills", fields: [createdById], references: [id])
   billItems    BillItem[]
   billPayments BillPayment[]
   reminders    PaymentReminder[]
@@ -287,7 +287,7 @@ model BillPayment {
   receivedById  String?     @map("received_by")
   notes         String?
   bill          Bill        @relation(fields: [billId], references: [id], onDelete: Cascade)
-  receivedBy    Employee?   @relation(fields: [receivedById], references: [id])
+  receivedBy    Employee?   @relation("EmployeeReceivedPayments", fields: [receivedById], references: [id])
 
   @@map("bill_payments")
 }
@@ -316,7 +316,7 @@ model ActivityLog {
   userAgent  String?   @map("user_agent")
   metadata   Json?
   createdAt  DateTime  @default(now()) @map("created_at")
-  employee   Employee? @relation(fields: [employeeId], references: [id])
+  employee   Employee? @relation("EmployeeActivityLogs", fields: [employeeId], references: [id])
 
   @@map("activity_logs")
 }

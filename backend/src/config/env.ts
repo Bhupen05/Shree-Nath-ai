@@ -1,5 +1,19 @@
-import "dotenv/config";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 import { z } from "zod";
+
+const currentFile = fileURLToPath(import.meta.url);
+const currentDir = path.dirname(currentFile);
+const backendDir = path.resolve(currentDir, "../..");
+const rootDir = path.resolve(backendDir, "..");
+
+for (const candidate of [
+  path.join(backendDir, ".env"),
+  path.join(rootDir, ".env")
+]) {
+  dotenv.config({ path: candidate, override: false });
+}
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -26,6 +40,12 @@ const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
   console.error("Invalid environment variables", parsed.error.flatten().fieldErrors);
+  console.error(
+    "Checked env files:",
+    path.join(backendDir, ".env"),
+    "and",
+    path.join(rootDir, ".env")
+  );
   throw new Error("Environment validation failed");
 }
 

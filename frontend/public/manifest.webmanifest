@@ -1,0 +1,9 @@
+{
+  "name": "Smart Inventory & Business Management System",
+  "short_name": "SIBMS",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4efe6",
+  "theme_color": "#1b4332",
+  "description": "Inventory, billing, employee, and AI workflows for auto parts and retail operations."
+}
