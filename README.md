@@ -12,16 +12,26 @@ This README gives you a practical execution checklist to build SIBMS properly fr
 
 ## Phase 0: Project Foundation
 
-- [ ] Finalize product scope (MVP vs v1)
-- [ ] Freeze module list for MVP:
-	- [ ] Auth + RBAC
-	- [ ] Inventory
-	- [ ] Billing
-	- [ ] Customers/Suppliers
-	- [ ] Dashboard
-- [ ] Define naming conventions (code, DB, API)
-- [ ] Setup branch strategy (`main`, `dev`, `feature/*`)
-- [ ] Setup issue tracker with milestones
+- [x] Finalize product scope (MVP vs v1)
+- [x] Freeze module list for MVP:
+	- [x] Auth + RBAC
+	- [x] Inventory
+	- [x] Billing
+	- [x] Customers/Suppliers
+	- [x] Dashboard
+- [x] Define naming conventions (code, DB, API)
+- [x] Setup branch strategy (`main`, `dev`, `feature/*`)
+- [x] Setup issue tracker with milestones
+
+Phase 0 project artifacts:
+- docs/phase-0/README.md
+- docs/phase-0/mvp-scope.md
+- docs/phase-0/module-boundaries.md
+- docs/phase-0/conventions.md
+- docs/phase-0/branching-strategy.md
+- docs/phase-0/milestones.md
+- .github/ISSUE_TEMPLATE/*
+- .github/pull_request_template.md
 
 Exit criteria:
 - One source-of-truth doc for MVP scope
