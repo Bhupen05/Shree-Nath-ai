@@ -5,7 +5,7 @@
   padding: 2rem 1rem;
 }
 
-.card {
+.auth-card {
   width: min(680px, 100%);
   background: linear-gradient(140deg, #fff7ef 0%, #ffe5d4 44%, #ffcfb3 100%);
   border: 1px solid #e7b79b;
@@ -34,68 +34,58 @@ h1 {
   color: #6e2f13;
 }
 
-.status {
+.auth-form {
   display: flex;
-  gap: 0.9rem;
-  align-items: center;
-  border-radius: 14px;
-  padding: 1rem;
-  border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.5);
+  flex-direction: column;
+  gap: 0.7rem;
 }
 
-.status strong {
-  display: block;
+.auth-form label {
+  font-weight: 700;
+  color: #52210c;
+}
+
+.auth-form input {
+  border: 1px solid #d19f85;
+  border-radius: 10px;
+  padding: 0.72rem 0.8rem;
   font-size: 1rem;
-  color: #3d1a0a;
 }
 
-.status p {
-  margin: 0.2rem 0 0;
-  color: #4c2a1b;
+.auth-form input:focus {
+  outline: 2px solid #c45d2f;
+  border-color: #c45d2f;
 }
 
-.loading {
-  border-color: #d0a28b;
-}
-
-.ok {
-  border-color: #2f8a4c;
-  background: rgba(232, 255, 238, 0.72);
-}
-
-.error {
-  border-color: #bf3f38;
+.error-box {
+  margin: 0.5rem 0;
+  padding: 0.7rem;
+  border: 1px solid #bf3f38;
+  border-radius: 10px;
   background: rgba(255, 233, 232, 0.8);
-}
-
-.dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #8a5d45;
-}
-
-.ok .dot {
-  background: #2f8a4c;
-}
-
-.error .dot {
-  background: #bf3f38;
-}
-
-.db-time {
-  margin: 1rem 0 0;
-  color: #64311a;
-  font-size: 0.95rem;
-}
-
-.db-time span {
+  color: #7b1212;
   font-weight: 700;
 }
 
-.actions {
-  margin-top: 1.35rem;
+.switch-auth {
+  margin-top: 1.1rem;
+  color: #5f2b11;
+}
+
+.switch-auth a {
+  color: #8f3d1d;
+  font-weight: 700;
+}
+
+.profile-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 1.2rem;
+  padding: 1rem;
+  border: 1px solid #dca684;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
 }
 
 button {
@@ -112,22 +102,6 @@ button:hover {
   background: #7a2a05;
 }
 
-.stack {
-  margin-top: 1.4rem;
-  display: flex;
-  gap: 0.55rem;
-  flex-wrap: wrap;
-}
-
-.stack span {
-  background: rgba(255, 255, 255, 0.55);
-  border: 1px solid #daab90;
-  border-radius: 999px;
-  padding: 0.4rem 0.75rem;
-  font-size: 0.85rem;
-  color: #5b220b;
-}
-
 @keyframes rise {
   from {
     opacity: 0;
@@ -141,7 +115,7 @@ button:hover {
 }
 
 @media (max-width: 640px) {
-  .card {
+  .auth-card {
     padding: 1.2rem;
     border-radius: 18px;
   }
