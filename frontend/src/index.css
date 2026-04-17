@@ -1,9 +1,17 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap');
 
 :root {
-  font-family: 'Space Grotesk', 'Trebuchet MS', sans-serif;
-  color: #271003;
-  background: #ffe6d6;
+  --ink: #2e1f13;
+  --muted: #70513f;
+  --line: #e6d3c1;
+  --panel: rgba(255, 250, 243, 0.9);
+  --accent: #b65b2f;
+  --accent-soft: #f8dcc8;
+  --accent-ink: #7f2f0f;
+
+  font-family: 'Manrope', 'Segoe UI', sans-serif;
+  color: var(--ink);
+  background: #f9efe2;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -18,11 +26,17 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    radial-gradient(circle at 12% 12%, rgba(255, 214, 184, 0.9) 0, rgba(255, 214, 184, 0) 35%),
-    radial-gradient(circle at 86% 18%, rgba(255, 190, 138, 0.75) 0, rgba(255, 190, 138, 0) 37%),
-    linear-gradient(160deg, #ffd8bf 0%, #ffe8d8 44%, #ffe1ca 100%);
+    radial-gradient(circle at 8% 8%, rgba(246, 212, 177, 0.7) 0, rgba(246, 212, 177, 0) 30%),
+    radial-gradient(circle at 88% 14%, rgba(231, 177, 121, 0.5) 0, rgba(231, 177, 121, 0) 32%),
+    linear-gradient(145deg, #f8e9d8 0%, #fdf4ea 46%, #f5e4d1 100%);
 }
 
 #root {
   min-height: 100vh;
+}
+
+h1,
+h2,
+h3 {
+  font-family: 'Fraunces', serif;
 }

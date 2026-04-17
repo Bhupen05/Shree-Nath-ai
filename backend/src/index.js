@@ -4,6 +4,9 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const PDFDocument = require('pdfkit');
+const { hasPermission } = require('./lib/permission');
+const { containsUnsafeVoiceQuery } = require('./lib/voice-guardrails');
 const { checkDatabaseConnection, initializeSchema, pool } = require('./db');
 
 const app = express();
@@ -23,9 +26,22 @@ function createToken(user) {
     {
       userId: user.id,
       email: user.email,
+      role: user.role,
+      permissions: user.permissions,
     },
     jwtSecret,
     { expiresIn: '7d' }
+  );
+}
+
+function createPasswordResetToken(userId) {
+  return jwt.sign(
+    {
+      type: 'password_reset',
+      userId,
+    },
+    jwtSecret,
+    { expiresIn: '15m' }
   );
 }
 
@@ -52,6 +68,657 @@ async function requireAuth(req, res, next) {
   }
 }
 
+function requirePermission(requiredPermission) {
+  return function permissionMiddleware(req, res, next) {
+    const permissions = req.user?.permissions;
+    if (!hasPermission(permissions, requiredPermission)) {
+      writeAuditLog({
+        userId: req.user?.userId || null,
+        action: 'AUTH_PERMISSION_DENIED',
+        entityType: 'permission',
+        newValue: {
+          requiredPermission,
+          grantedPermissions: permissions || [],
+          path: req.path,
+          method: req.method,
+        },
+        ipAddress: req.ip,
+      });
+
+      return res.status(403).json({
+        message: 'Forbidden: insufficient permissions',
+        code: 'INSUFFICIENT_PERMISSIONS',
+      });
+    }
+
+    return next();
+  };
+}
+
+async function writeAuditLog({
+  userId = null,
+  action,
+  entityType,
+  entityId = null,
+  oldValue = null,
+  newValue = null,
+  ipAddress = null,
+}) {
+  try {
+    await pool.query(
+      `
+        INSERT INTO audit_logs (user_id, action, entity_type, entity_id, old_value, new_value, ip_address)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `,
+      [userId, action, entityType, entityId, oldValue, newValue, ipAddress]
+    );
+  } catch (_error) {
+    // Do not block auth flows due to audit log write failures.
+  }
+}
+
+async function getUserWithRole(userId) {
+  const result = await pool.query(
+    `
+      SELECT
+        u.id,
+        u.name,
+        u.email,
+        u.created_at,
+        u.role_id,
+        r.name AS role,
+        COALESCE(r.permissions, '[]'::jsonb) AS permissions
+      FROM users u
+      LEFT JOIN roles r ON r.id = u.role_id
+      WHERE u.id = $1
+      LIMIT 1
+    `,
+    [userId]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function getUserByEmailForAuth(email) {
+  const result = await pool.query(
+    `
+      SELECT
+        u.id,
+        u.name,
+        u.email,
+        u.password_hash,
+        u.created_at,
+        u.role_id,
+        r.name AS role,
+        COALESCE(r.permissions, '[]'::jsonb) AS permissions
+      FROM users u
+      LEFT JOIN roles r ON r.id = u.role_id
+      WHERE u.email = $1
+      LIMIT 1
+    `,
+    [email]
+  );
+
+  return result.rows[0] || null;
+}
+
+function normalizeUserForResponse(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    created_at: user.created_at,
+    role: user.role || null,
+    permissions: user.permissions || [],
+  };
+}
+
+function toInteger(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function toMoney(value, fallback = 0) {
+  const parsed = Number.parseFloat(value);
+  if (Number.isNaN(parsed)) {
+    return fallback;
+  }
+  return parsed;
+}
+
+async function sectionExists(sectionId, client = pool) {
+  const result = await client.query('SELECT id FROM sections WHERE id = $1 LIMIT 1', [sectionId]);
+  return result.rowCount > 0;
+}
+
+async function partExists(partId, client = pool) {
+  const result = await client.query('SELECT id FROM parts WHERE id = $1 LIMIT 1', [partId]);
+  return result.rowCount > 0;
+}
+
+async function getPartStock(partId, sectionId = null, client = pool) {
+  if (sectionId === null) {
+    const result = await client.query(
+      'SELECT COALESCE(SUM(quantity_delta), 0)::INTEGER AS qty FROM stock_ledger WHERE part_id = $1',
+      [partId]
+    );
+    return result.rows[0].qty;
+  }
+
+  const result = await client.query(
+    'SELECT COALESCE(SUM(quantity_delta), 0)::INTEGER AS qty FROM stock_ledger WHERE part_id = $1 AND section_id = $2',
+    [partId, sectionId]
+  );
+  return result.rows[0].qty;
+}
+
+async function writeStockLedgerEntry({
+  client,
+  partId,
+  sectionId = null,
+  transactionType,
+  quantityDelta,
+  referenceId = null,
+  performedBy = null,
+}) {
+  const quantityAfter = await getPartStock(partId, null, client) + quantityDelta;
+
+  await client.query(
+    `
+      INSERT INTO stock_ledger (part_id, section_id, transaction_type, quantity_delta, quantity_after, reference_id, performed_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `,
+    [partId, sectionId, transactionType, quantityDelta, quantityAfter, referenceId, performedBy]
+  );
+}
+
+const NOTIFICATION_CHANNELS = ['SMS', 'WHATSAPP', 'EMAIL', 'INTERNAL'];
+const NOTIFICATION_JOB_STATUSES = ['PENDING', 'SENT', 'FAILED', 'CANCELLED'];
+
+function toBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  return ['true', '1', 'yes'].includes(String(value).toLowerCase());
+}
+
+function normalizeNotificationChannel(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function normalizeTemplatePayload(payload = {}) {
+  const channel = normalizeNotificationChannel(payload.channel);
+  if (!NOTIFICATION_CHANNELS.includes(channel)) {
+    return { valid: false, message: 'channel must be one of SMS, WHATSAPP, EMAIL, INTERNAL' };
+  }
+
+  if (!payload.name || !String(payload.name).trim()) {
+    return { valid: false, message: 'name is required' };
+  }
+
+  if (!payload.body || !String(payload.body).trim()) {
+    return { valid: false, message: 'body is required' };
+  }
+
+  return {
+    valid: true,
+    normalized: {
+      name: String(payload.name).trim(),
+      channel,
+      subject: payload.subject ? String(payload.subject).trim() : null,
+      body: String(payload.body),
+      isActive: payload.isActive === undefined ? true : toBoolean(payload.isActive, true),
+    },
+  };
+}
+
+async function generateBillReminderJobs({ client, daysAhead = 2, includeOverdue = true, createdBy }) {
+  const clampedDaysAhead = Math.min(Math.max(toInteger(daysAhead) || 2, 0), 30);
+
+  const result = await client.query(
+    `
+      WITH due_bills AS (
+        SELECT
+          b.id AS bill_id,
+          b.party_type,
+          b.party_id,
+          b.bill_number,
+          b.due_date,
+          b.amount_due,
+          CASE
+            WHEN b.party_type = 'CUSTOMER' THEN c.name
+            ELSE s.name
+          END AS recipient_name,
+          CASE
+            WHEN b.party_type = 'CUSTOMER' THEN c.phone
+            ELSE s.phone
+          END AS recipient_phone,
+          CASE
+            WHEN b.party_type = 'CUSTOMER' THEN c.email
+            ELSE s.email
+          END AS recipient_email
+        FROM bills b
+        LEFT JOIN customers c ON b.party_type = 'CUSTOMER' AND c.id = b.party_id
+        LEFT JOIN suppliers s ON b.party_type = 'SUPPLIER' AND s.id = b.party_id
+        WHERE b.status IN ('CONFIRMED', 'PARTIALLY_PAID')
+          AND b.amount_due > 0
+          AND b.due_date IS NOT NULL
+          AND (
+            b.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + ($1::INTEGER * INTERVAL '1 day')
+            OR ($2::BOOLEAN = TRUE AND b.due_date < CURRENT_DATE)
+          )
+      )
+      INSERT INTO notification_jobs (
+        job_type,
+        bill_id,
+        party_type,
+        party_id,
+        recipient_name,
+        recipient_phone,
+        recipient_email,
+        due_date,
+        outstanding_amount,
+        status,
+        scheduled_for,
+        payload,
+        created_by
+      )
+      SELECT
+        'BILL_DUE_REMINDER',
+        db.bill_id,
+        db.party_type,
+        db.party_id,
+        db.recipient_name,
+        db.recipient_phone,
+        db.recipient_email,
+        db.due_date,
+        db.amount_due,
+        'PENDING',
+        NOW(),
+        jsonb_build_object(
+          'billNumber', db.bill_number,
+          'dueDate', db.due_date,
+          'amountDue', db.amount_due,
+          'stage', CASE WHEN db.due_date < CURRENT_DATE THEN 'OVERDUE' ELSE 'UPCOMING' END
+        ),
+        $3
+      FROM due_bills db
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM notification_jobs nj
+        WHERE nj.bill_id = db.bill_id
+          AND nj.job_type = 'BILL_DUE_REMINDER'
+          AND nj.status IN ('PENDING', 'SENT')
+          AND nj.due_date = db.due_date
+      )
+      RETURNING id
+    `,
+    [clampedDaysAhead, includeOverdue, createdBy || null]
+  );
+
+  return {
+    createdCount: result.rowCount,
+    daysAhead: clampedDaysAhead,
+    includeOverdue,
+  };
+}
+
+async function dispatchPendingNotificationJobs({ client, limit = 20, actorUserId = null }) {
+  const clampedLimit = Math.min(Math.max(toInteger(limit) || 20, 1), 100);
+
+  const pendingResult = await client.query(
+    `
+      SELECT id, job_type, bill_id, recipient_name, recipient_phone, recipient_email, due_date, outstanding_amount, payload
+      FROM notification_jobs
+      WHERE status = 'PENDING'
+        AND scheduled_for <= NOW()
+      ORDER BY scheduled_for ASC, id ASC
+      LIMIT $1
+      FOR UPDATE SKIP LOCKED
+    `,
+    [clampedLimit]
+  );
+
+  let sentCount = 0;
+  let failedCount = 0;
+
+  for (const job of pendingResult.rows) {
+    try {
+      const renderedMessage = `Reminder: Bill ${job.payload?.billNumber || job.bill_id} has due amount ${job.outstanding_amount} and due date ${job.due_date}.`;
+      const deliveryPayload = {
+        recipientName: job.recipient_name,
+        recipientPhone: job.recipient_phone,
+        recipientEmail: job.recipient_email,
+        message: renderedMessage,
+      };
+
+      await client.query(
+        `
+          INSERT INTO notification_delivery_logs (job_id, channel, status, provider_message, payload, provider_response)
+          VALUES ($1, 'INTERNAL', 'SENT', $2, $3, $4)
+        `,
+        [job.id, 'Dispatched via internal simulator', deliveryPayload, { dispatchedBy: actorUserId }]
+      );
+
+      await client.query(
+        `
+          UPDATE notification_jobs
+          SET status = 'SENT',
+              sent_at = NOW(),
+              last_error = NULL,
+              attempt_count = attempt_count + 1,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [job.id]
+      );
+
+      sentCount += 1;
+    } catch (error) {
+      await client.query(
+        `
+          INSERT INTO notification_delivery_logs (job_id, channel, status, provider_message, payload, provider_response)
+          VALUES ($1, 'INTERNAL', 'FAILED', $2, $3, $4)
+        `,
+        [job.id, error.message, { jobType: job.job_type }, null]
+      );
+
+      await client.query(
+        `
+          UPDATE notification_jobs
+          SET status = 'FAILED',
+              last_error = $2,
+              attempt_count = attempt_count + 1,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [job.id, error.message]
+      );
+
+      failedCount += 1;
+    }
+  }
+
+  return {
+    pickedCount: pendingResult.rowCount,
+    sentCount,
+    failedCount,
+  };
+}
+
+let notificationWorkerTimer = null;
+let notificationWorkerActive = false;
+
+async function runNotificationWorkerTick() {
+  if (notificationWorkerActive) {
+    return;
+  }
+
+  notificationWorkerActive = true;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await dispatchPendingNotificationJobs({ client, limit: 25 });
+    await client.query('COMMIT');
+  } catch (_error) {
+    await client.query('ROLLBACK');
+  } finally {
+    client.release();
+    notificationWorkerActive = false;
+  }
+}
+
+function startNotificationWorker() {
+  if (notificationWorkerTimer) {
+    return;
+  }
+
+  const enabled = toBoolean(process.env.NOTIFICATION_WORKER_ENABLED, true);
+  if (!enabled) {
+    return;
+  }
+
+  const intervalMs = Math.min(Math.max(toInteger(process.env.NOTIFICATION_WORKER_INTERVAL_MS) || 60000, 5000), 300000);
+  notificationWorkerTimer = setInterval(() => {
+    runNotificationWorkerTick();
+  }, intervalMs);
+}
+
+function stopNotificationWorker() {
+  if (notificationWorkerTimer) {
+    clearInterval(notificationWorkerTimer);
+    notificationWorkerTimer = null;
+  }
+}
+
+const VOICE_INTENTS = {
+  PART_LOOKUP: 'PART_LOOKUP',
+  PART_LOCATION_LOOKUP: 'PART_LOCATION_LOOKUP',
+  PART_STOCK_LOOKUP: 'PART_STOCK_LOOKUP',
+};
+
+const VOICE_STOP_WORDS = new Set([
+  'where', 'is', 'are', 'the', 'a', 'an', 'find', 'show', 'me', 'part', 'parts',
+  'with', 'for', 'of', 'stock', 'location', 'available', 'quantity', 'do', 'you', 'have',
+  'in', 'at', 'to', 'please', 'lookup', 'search', 'need', 'get',
+]);
+
+function normalizeVoiceText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function extractYearFromVoiceQuery(text) {
+  const match = text.match(/\b(19|20)\d{2}\b/);
+  if (!match) {
+    return null;
+  }
+
+  return toInteger(match[0]);
+}
+
+function extractMakeModelFromVoiceQuery(text) {
+  const match = text.match(/(?:for|of)\s+([a-zA-Z0-9-]+)(?:\s+([a-zA-Z0-9-]+))?/i);
+  if (!match) {
+    return { make: null, model: null };
+  }
+
+  return {
+    make: match[1] ? String(match[1]).toUpperCase() : null,
+    model: match[2] ? String(match[2]).toUpperCase() : null,
+  };
+}
+
+function extractSearchTermFromVoiceQuery(text) {
+  const cleaned = text.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ');
+  const tokens = cleaned
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((token) => token.length > 1 && !VOICE_STOP_WORDS.has(token));
+
+  if (tokens.length === 0) {
+    return null;
+  }
+
+  return tokens.slice(0, 4).join(' ');
+}
+
+function detectVoiceIntent(text) {
+  const lower = text.toLowerCase();
+  if (/(where|location|shelf|cabinet|section|room)/.test(lower)) {
+    return VOICE_INTENTS.PART_LOCATION_LOOKUP;
+  }
+
+  if (/(stock|available|quantity|in hand|balance)/.test(lower)) {
+    return VOICE_INTENTS.PART_STOCK_LOOKUP;
+  }
+
+  return VOICE_INTENTS.PART_LOOKUP;
+}
+
+function extractVoiceEntities(text) {
+  const year = extractYearFromVoiceQuery(text);
+  const { make, model } = extractMakeModelFromVoiceQuery(text);
+  const searchTerm = extractSearchTermFromVoiceQuery(text);
+
+  return {
+    year,
+    make,
+    model,
+    searchTerm,
+  };
+}
+
+async function resolveVoiceIntentWithFallback(text) {
+  const provider = (process.env.AI_INTENT_PROVIDER || 'rules').toLowerCase();
+
+  // Current phase uses deterministic parsing. LLM provider can be plugged later.
+  return {
+    provider,
+    intent: detectVoiceIntent(text),
+    entities: extractVoiceEntities(text),
+    usedFallback: provider !== 'rules',
+  };
+}
+
+async function resolveSpeechToText({ audioBase64, mockTranscript }) {
+  const provider = (process.env.STT_PROVIDER || 'mock').toLowerCase();
+
+  if (mockTranscript && String(mockTranscript).trim()) {
+    return {
+      transcript: normalizeVoiceText(mockTranscript),
+      provider: 'mock-input',
+      mocked: true,
+    };
+  }
+
+  if (!audioBase64) {
+    return {
+      error: 'Either mockTranscript or audioBase64 is required',
+      statusCode: 400,
+    };
+  }
+
+  if (provider === 'mock') {
+    return {
+      transcript: 'mock transcript from audio payload',
+      provider,
+      mocked: true,
+    };
+  }
+
+  return {
+    error: `STT provider ${provider} is not configured in this phase`,
+    statusCode: 501,
+  };
+}
+
+async function queryVoicePartMatches({ searchTerm, make, model, year, limit = 5 }) {
+  const cappedLimit = Math.min(Math.max(toInteger(limit) || 5, 1), 20);
+
+  const result = await pool.query(
+    `
+      SELECT
+        p.id,
+        p.sku,
+        p.name,
+        p.reorder_threshold,
+        COALESCE(stock.current_stock, 0)::INTEGER AS current_stock,
+        s.id AS section_id,
+        s.name AS section_name,
+        c.name AS cabinet_name,
+        r.name AS room_name
+      FROM parts p
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(sl.quantity_delta), 0) AS current_stock
+        FROM stock_ledger sl
+        WHERE sl.part_id = p.id
+      ) stock ON TRUE
+      LEFT JOIN sections s ON s.id = p.section_id
+      LEFT JOIN cabinets c ON c.id = s.cabinet_id
+      LEFT JOIN rooms r ON r.id = c.room_id
+      WHERE (
+        $1::TEXT IS NULL
+        OR p.name ILIKE ('%' || $1 || '%')
+        OR p.sku ILIKE ('%' || $1 || '%')
+      )
+      AND (
+        $2::TEXT IS NULL
+        OR EXISTS (
+          SELECT 1
+          FROM vehicle_compatibility vc
+          WHERE vc.part_id = p.id
+            AND UPPER(vc.make) = UPPER($2)
+        )
+      )
+      AND (
+        $3::TEXT IS NULL
+        OR EXISTS (
+          SELECT 1
+          FROM vehicle_compatibility vc
+          WHERE vc.part_id = p.id
+            AND UPPER(vc.model) = UPPER($3)
+        )
+      )
+      AND (
+        $4::INTEGER IS NULL
+        OR EXISTS (
+          SELECT 1
+          FROM vehicle_compatibility vc
+          WHERE vc.part_id = p.id
+            AND (vc.year_from IS NULL OR vc.year_from <= $4)
+            AND (vc.year_to IS NULL OR vc.year_to >= $4)
+        )
+      )
+      ORDER BY p.name ASC
+      LIMIT $5
+    `,
+    [searchTerm || null, make || null, model || null, year || null, cappedLimit]
+  );
+
+  return result.rows;
+}
+
+function buildVoiceQueryAnswer({ intent, entities, matches }) {
+  if (!matches.length) {
+    return 'No matching part found. Try part name/SKU or include make-model-year details.';
+  }
+
+  const top = matches.slice(0, 3).map((item) => {
+    const location = item.section_name
+      ? `${item.room_name || 'Room N/A'} > ${item.cabinet_name || 'Cabinet N/A'} > ${item.section_name}`
+      : 'Location not assigned';
+    return `${item.name} (${item.sku}) stock ${item.current_stock}, location ${location}`;
+  });
+
+  const prefix =
+    intent === VOICE_INTENTS.PART_LOCATION_LOOKUP
+      ? 'Location lookup:'
+      : intent === VOICE_INTENTS.PART_STOCK_LOOKUP
+        ? 'Stock lookup:'
+        : 'Part lookup:';
+
+  const vehicleHints = [];
+  if (entities.make) {
+    vehicleHints.push(entities.make);
+  }
+  if (entities.model) {
+    vehicleHints.push(entities.model);
+  }
+  if (entities.year) {
+    vehicleHints.push(String(entities.year));
+  }
+
+  const context = vehicleHints.length ? ` for ${vehicleHints.join(' ')}` : '';
+  return `${prefix}${context} ${top.join(' | ')}`;
+}
+
 app.post('/api/auth/register', async (req, res) => {
   const { name, email, password } = req.body || {};
 
@@ -65,20 +732,40 @@ app.post('/api/auth/register', async (req, res) => {
 
   try {
     const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedName = String(name).trim();
     const passwordHash = await bcrypt.hash(String(password), 10);
 
     const result = await pool.query(
-      'INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name, email, created_at',
-      [String(name).trim(), normalizedEmail, passwordHash]
+      `
+        INSERT INTO users (name, email, password_hash, role_id)
+        VALUES (
+          $1,
+          $2,
+          $3,
+          (SELECT id FROM roles WHERE name = 'VIEW_ONLY')
+        )
+        RETURNING id, name, email, created_at
+      `,
+      [normalizedName, normalizedEmail, passwordHash]
     );
 
-    const user = result.rows[0];
+    const createdUser = result.rows[0];
+    const user = await getUserWithRole(createdUser.id);
     const token = createToken(user);
+
+    await writeAuditLog({
+      userId: user.id,
+      action: 'AUTH_REGISTER',
+      entityType: 'user',
+      entityId: user.id,
+      newValue: { email: user.email, role: user.role },
+      ipAddress: req.ip,
+    });
 
     return res.status(201).json({
       message: 'Registration successful',
       token,
-      user,
+      user: normalizeUserForResponse(user),
     });
   } catch (error) {
     if (error.code === '23505') {
@@ -98,33 +785,45 @@ app.post('/api/auth/login', async (req, res) => {
 
   try {
     const normalizedEmail = String(email).trim().toLowerCase();
-    const result = await pool.query(
-      'SELECT id, name, email, password_hash, created_at FROM users WHERE email = $1',
-      [normalizedEmail]
-    );
+    const user = await getUserByEmailForAuth(normalizedEmail);
 
-    if (result.rowCount === 0) {
+    if (!user) {
+      await writeAuditLog({
+        action: 'AUTH_LOGIN_FAILED',
+        entityType: 'user',
+        ipAddress: req.ip,
+        newValue: { email: normalizedEmail },
+      });
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    const user = result.rows[0];
     const passwordMatch = await bcrypt.compare(String(password), user.password_hash);
 
     if (!passwordMatch) {
+      await writeAuditLog({
+        userId: user.id,
+        action: 'AUTH_LOGIN_FAILED',
+        entityType: 'user',
+        entityId: user.id,
+        ipAddress: req.ip,
+      });
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
     const token = createToken(user);
 
+    await writeAuditLog({
+      userId: user.id,
+      action: 'AUTH_LOGIN_SUCCESS',
+      entityType: 'user',
+      entityId: user.id,
+      ipAddress: req.ip,
+    });
+
     return res.json({
       message: 'Login successful',
       token,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        created_at: user.created_at,
-      },
+      user: normalizeUserForResponse(user),
     });
   } catch (error) {
     return res.status(500).json({ message: 'Unable to login', error: error.message });
@@ -133,18 +832,2168 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/me', requireAuth, async (req, res) => {
   try {
+    const user = await getUserWithRole(req.user.userId);
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    return res.json({ user: normalizeUserForResponse(user) });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch user profile', error: error.message });
+  }
+});
+
+app.post('/api/auth/refresh', requireAuth, async (req, res) => {
+  try {
+    const user = await getUserWithRole(req.user.userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const token = createToken(user);
+
+    await writeAuditLog({
+      userId: user.id,
+      action: 'AUTH_TOKEN_REFRESH',
+      entityType: 'user',
+      entityId: user.id,
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      message: 'Token refreshed successfully',
+      token,
+      user: normalizeUserForResponse(user),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to refresh token', error: error.message });
+  }
+});
+
+app.post('/api/auth/logout', requireAuth, async (req, res) => {
+  await writeAuditLog({
+    userId: req.user.userId,
+    action: 'AUTH_LOGOUT',
+    entityType: 'user',
+    entityId: req.user.userId,
+    ipAddress: req.ip,
+  });
+
+  return res.json({ message: 'Logout successful' });
+});
+
+app.post('/api/auth/password-reset/request', async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) {
+    return res.status(400).json({ message: 'Email is required' });
+  }
+
+  try {
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const user = await getUserByEmailForAuth(normalizedEmail);
+
+    if (user) {
+      const resetToken = createPasswordResetToken(user.id);
+
+      await writeAuditLog({
+        userId: user.id,
+        action: 'AUTH_PASSWORD_RESET_REQUEST',
+        entityType: 'user',
+        entityId: user.id,
+        ipAddress: req.ip,
+      });
+
+      return res.json({
+        message: 'Password reset request created',
+        // Dev-only response for current phase; wire to email/SMS provider in production.
+        resetToken,
+      });
+    }
+
+    return res.json({
+      message: 'Password reset request created',
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to process password reset request', error: error.message });
+  }
+});
+
+app.post('/api/auth/password-reset/confirm', async (req, res) => {
+  const { token, newPassword } = req.body || {};
+
+  if (!token || !newPassword) {
+    return res.status(400).json({ message: 'Token and newPassword are required' });
+  }
+
+  if (String(newPassword).length < 6) {
+    return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+  }
+
+  try {
+    const decoded = jwt.verify(String(token), jwtSecret);
+    if (decoded.type !== 'password_reset') {
+      return res.status(400).json({ message: 'Invalid reset token type' });
+    }
+
+    const passwordHash = await bcrypt.hash(String(newPassword), 10);
     const result = await pool.query(
-      'SELECT id, name, email, created_at FROM users WHERE id = $1',
-      [req.user.userId]
+      `
+        UPDATE users
+        SET password_hash = $1,
+            updated_at = NOW()
+        WHERE id = $2
+        RETURNING id, email
+      `,
+      [passwordHash, decoded.userId]
     );
 
     if (result.rowCount === 0) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    return res.json({ user: result.rows[0] });
+    await writeAuditLog({
+      userId: result.rows[0].id,
+      action: 'AUTH_PASSWORD_RESET_CONFIRM',
+      entityType: 'user',
+      entityId: result.rows[0].id,
+      ipAddress: req.ip,
+    });
+
+    return res.json({ message: 'Password reset successful' });
+  } catch (_error) {
+    return res.status(400).json({ message: 'Invalid or expired reset token' });
+  }
+});
+
+app.get('/api/auth/permissions/check', requireAuth, requirePermission('dashboard:read'), async (_req, res) => {
+  return res.json({ message: 'Permission check passed for dashboard:read' });
+});
+
+app.get('/api/dashboard/kpis', requireAuth, requirePermission('dashboard:read'), async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          (SELECT COUNT(*) FROM users)::INTEGER AS users_count,
+          (SELECT COUNT(*) FROM parts)::INTEGER AS parts_count,
+          (SELECT COUNT(*) FROM bills)::INTEGER AS bills_count,
+          (SELECT COUNT(*) FROM customers)::INTEGER AS customers_count
+      `
+    );
+
+    return res.json({
+      message: 'Dashboard KPIs fetched successfully',
+      kpis: result.rows[0],
+    });
   } catch (error) {
-    return res.status(500).json({ message: 'Unable to fetch user profile', error: error.message });
+    return res.status(500).json({ message: 'Unable to fetch dashboard KPIs', error: error.message });
+  }
+});
+
+app.get('/api/inventory/parts', requireAuth, requirePermission('inventory:read'), async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          p.id,
+          p.sku,
+          p.name,
+          p.description,
+          p.cost_price,
+          p.selling_price,
+          p.reorder_threshold,
+          p.section_id,
+          COALESCE(SUM(sl.quantity_delta), 0)::INTEGER AS current_stock,
+          (COALESCE(SUM(sl.quantity_delta), 0)::INTEGER <= p.reorder_threshold) AS low_stock,
+          p.created_at,
+          p.updated_at
+        FROM parts p
+        LEFT JOIN stock_ledger sl ON sl.part_id = p.id
+        GROUP BY p.id
+        ORDER BY p.id DESC
+        LIMIT 50
+      `
+    );
+
+    return res.json({
+      message: 'Inventory parts fetched successfully',
+      items: result.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch inventory parts', error: error.message });
+  }
+});
+
+app.post('/api/inventory/locations/rooms', requireAuth, requirePermission('inventory:write'), async (req, res) => {
+  const { name, description } = req.body || {};
+  if (!name) {
+    return res.status(400).json({ message: 'Room name is required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO rooms (name, description)
+        VALUES ($1, $2)
+        RETURNING id, name, description, created_at
+      `,
+      [String(name).trim(), description || null]
+    );
+
+    return res.status(201).json({ message: 'Room created successfully', room: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'Room name already exists' });
+    }
+    return res.status(500).json({ message: 'Unable to create room', error: error.message });
+  }
+});
+
+app.post('/api/inventory/locations/cabinets', requireAuth, requirePermission('inventory:write'), async (req, res) => {
+  const { roomId, name, code } = req.body || {};
+  const parsedRoomId = toInteger(roomId);
+  if (!parsedRoomId || !name) {
+    return res.status(400).json({ message: 'roomId and cabinet name are required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO cabinets (room_id, name, code)
+        VALUES ($1, $2, $3)
+        RETURNING id, room_id, name, code, created_at
+      `,
+      [parsedRoomId, String(name).trim(), code || null]
+    );
+
+    return res.status(201).json({ message: 'Cabinet created successfully', cabinet: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23503') {
+      return res.status(404).json({ message: 'Room not found' });
+    }
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'Cabinet name already exists in this room' });
+    }
+    return res.status(500).json({ message: 'Unable to create cabinet', error: error.message });
+  }
+});
+
+app.post('/api/inventory/locations/sections', requireAuth, requirePermission('inventory:write'), async (req, res) => {
+  const { cabinetId, name, code } = req.body || {};
+  const parsedCabinetId = toInteger(cabinetId);
+  if (!parsedCabinetId || !name) {
+    return res.status(400).json({ message: 'cabinetId and section name are required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO sections (cabinet_id, name, code)
+        VALUES ($1, $2, $3)
+        RETURNING id, cabinet_id, name, code, created_at
+      `,
+      [parsedCabinetId, String(name).trim(), code || null]
+    );
+
+    return res.status(201).json({ message: 'Section created successfully', section: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23503') {
+      return res.status(404).json({ message: 'Cabinet not found' });
+    }
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'Section name already exists in this cabinet' });
+    }
+    return res.status(500).json({ message: 'Unable to create section', error: error.message });
+  }
+});
+
+app.get('/api/inventory/locations/tree', requireAuth, requirePermission('inventory:read'), async (_req, res) => {
+  try {
+    const roomsResult = await pool.query('SELECT id, name, description, created_at FROM rooms ORDER BY name ASC');
+    const cabinetsResult = await pool.query('SELECT id, room_id, name, code, created_at FROM cabinets ORDER BY name ASC');
+    const sectionsResult = await pool.query('SELECT id, cabinet_id, name, code, created_at FROM sections ORDER BY name ASC');
+
+    const cabinetsByRoom = new Map();
+    for (const cabinet of cabinetsResult.rows) {
+      const list = cabinetsByRoom.get(cabinet.room_id) || [];
+      list.push({ ...cabinet, sections: [] });
+      cabinetsByRoom.set(cabinet.room_id, list);
+    }
+
+    const cabinetIndex = new Map();
+    for (const cabinets of cabinetsByRoom.values()) {
+      for (const cabinet of cabinets) {
+        cabinetIndex.set(cabinet.id, cabinet);
+      }
+    }
+
+    for (const section of sectionsResult.rows) {
+      const cabinet = cabinetIndex.get(section.cabinet_id);
+      if (cabinet) {
+        cabinet.sections.push(section);
+      }
+    }
+
+    const tree = roomsResult.rows.map((room) => ({
+      ...room,
+      cabinets: cabinetsByRoom.get(room.id) || [],
+    }));
+
+    return res.json({ message: 'Location tree fetched successfully', items: tree });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch location tree', error: error.message });
+  }
+});
+
+app.post('/api/inventory/parts', requireAuth, requirePermission('inventory:write'), async (req, res) => {
+  const {
+    sku,
+    name,
+    description,
+    categoryId,
+    brandId,
+    costPrice,
+    sellingPrice,
+    reorderThreshold,
+    sectionId,
+  } = req.body || {};
+
+  if (!sku || !name) {
+    return res.status(400).json({ message: 'sku and name are required' });
+  }
+
+  const parsedSectionId = toInteger(sectionId);
+  if (sectionId !== undefined && sectionId !== null && !parsedSectionId) {
+    return res.status(400).json({ message: 'sectionId must be a valid integer' });
+  }
+
+  try {
+    if (parsedSectionId && !(await sectionExists(parsedSectionId))) {
+      return res.status(404).json({ message: 'Section not found' });
+    }
+
+    const result = await pool.query(
+      `
+        INSERT INTO parts (
+          sku,
+          name,
+          description,
+          category_id,
+          brand_id,
+          cost_price,
+          selling_price,
+          reorder_threshold,
+          section_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id, sku, name, description, cost_price, selling_price, reorder_threshold, section_id, created_at, updated_at
+      `,
+      [
+        String(sku).trim(),
+        String(name).trim(),
+        description || null,
+        toInteger(categoryId),
+        toInteger(brandId),
+        toMoney(costPrice, 0),
+        toMoney(sellingPrice, 0),
+        toInteger(reorderThreshold) || 0,
+        parsedSectionId,
+      ]
+    );
+
+    return res.status(201).json({ message: 'Part created successfully', part: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'SKU already exists' });
+    }
+    if (error.code === '23503') {
+      return res.status(400).json({ message: 'Invalid category, brand, or section reference' });
+    }
+    return res.status(500).json({ message: 'Unable to create part', error: error.message });
+  }
+});
+
+app.get('/api/inventory/parts/:id', requireAuth, requirePermission('inventory:read'), async (req, res) => {
+  const partId = toInteger(req.params.id);
+  if (!partId) {
+    return res.status(400).json({ message: 'Invalid part id' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          p.id,
+          p.sku,
+          p.name,
+          p.description,
+          p.cost_price,
+          p.selling_price,
+          p.reorder_threshold,
+          p.section_id,
+          COALESCE(SUM(sl.quantity_delta), 0)::INTEGER AS current_stock,
+          (COALESCE(SUM(sl.quantity_delta), 0)::INTEGER <= p.reorder_threshold) AS low_stock,
+          p.created_at,
+          p.updated_at
+        FROM parts p
+        LEFT JOIN stock_ledger sl ON sl.part_id = p.id
+        WHERE p.id = $1
+        GROUP BY p.id
+      `,
+      [partId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Part not found' });
+    }
+
+    return res.json({ message: 'Part fetched successfully', part: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch part', error: error.message });
+  }
+});
+
+app.put('/api/inventory/parts/:id', requireAuth, requirePermission('inventory:write'), async (req, res) => {
+  const partId = toInteger(req.params.id);
+  if (!partId) {
+    return res.status(400).json({ message: 'Invalid part id' });
+  }
+
+  const {
+    sku,
+    name,
+    description,
+    categoryId,
+    brandId,
+    costPrice,
+    sellingPrice,
+    reorderThreshold,
+    sectionId,
+  } = req.body || {};
+
+  const parsedSectionId = toInteger(sectionId);
+  if (sectionId !== undefined && sectionId !== null && !parsedSectionId) {
+    return res.status(400).json({ message: 'sectionId must be a valid integer' });
+  }
+
+  try {
+    if (!(await partExists(partId))) {
+      return res.status(404).json({ message: 'Part not found' });
+    }
+
+    if (parsedSectionId && !(await sectionExists(parsedSectionId))) {
+      return res.status(404).json({ message: 'Section not found' });
+    }
+
+    const result = await pool.query(
+      `
+        UPDATE parts
+        SET
+          sku = COALESCE($1, sku),
+          name = COALESCE($2, name),
+          description = $3,
+          category_id = $4,
+          brand_id = $5,
+          cost_price = COALESCE($6, cost_price),
+          selling_price = COALESCE($7, selling_price),
+          reorder_threshold = COALESCE($8, reorder_threshold),
+          section_id = $9,
+          updated_at = NOW()
+        WHERE id = $10
+        RETURNING id, sku, name, description, cost_price, selling_price, reorder_threshold, section_id, created_at, updated_at
+      `,
+      [
+        sku ? String(sku).trim() : null,
+        name ? String(name).trim() : null,
+        description || null,
+        toInteger(categoryId),
+        toInteger(brandId),
+        costPrice !== undefined ? toMoney(costPrice, 0) : null,
+        sellingPrice !== undefined ? toMoney(sellingPrice, 0) : null,
+        reorderThreshold !== undefined ? toInteger(reorderThreshold) || 0 : null,
+        sectionId !== undefined ? parsedSectionId : null,
+        partId,
+      ]
+    );
+
+    return res.json({ message: 'Part updated successfully', part: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'SKU already exists' });
+    }
+    if (error.code === '23503') {
+      return res.status(400).json({ message: 'Invalid category, brand, or section reference' });
+    }
+    return res.status(500).json({ message: 'Unable to update part', error: error.message });
+  }
+});
+
+app.post('/api/inventory/parts/:id/compatibility', requireAuth, requirePermission('inventory:write'), async (req, res) => {
+  const partId = toInteger(req.params.id);
+  const { make, model, yearFrom, yearTo, notes } = req.body || {};
+
+  if (!partId) {
+    return res.status(400).json({ message: 'Invalid part id' });
+  }
+
+  if (!make || !model) {
+    return res.status(400).json({ message: 'make and model are required' });
+  }
+
+  const parsedYearFrom = toInteger(yearFrom);
+  const parsedYearTo = toInteger(yearTo);
+  if (parsedYearFrom && parsedYearTo && parsedYearFrom > parsedYearTo) {
+    return res.status(400).json({ message: 'yearFrom cannot be greater than yearTo' });
+  }
+
+  try {
+    if (!(await partExists(partId))) {
+      return res.status(404).json({ message: 'Part not found' });
+    }
+
+    const result = await pool.query(
+      `
+        INSERT INTO vehicle_compatibility (part_id, make, model, year_from, year_to, notes)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, part_id, make, model, year_from, year_to, notes, created_at
+      `,
+      [partId, String(make).trim(), String(model).trim(), parsedYearFrom, parsedYearTo, notes || null]
+    );
+
+    return res.status(201).json({ message: 'Compatibility added successfully', item: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to add compatibility', error: error.message });
+  }
+});
+
+app.get('/api/inventory/parts/:id/compatibility', requireAuth, requirePermission('inventory:read'), async (req, res) => {
+  const partId = toInteger(req.params.id);
+  if (!partId) {
+    return res.status(400).json({ message: 'Invalid part id' });
+  }
+
+  try {
+    if (!(await partExists(partId))) {
+      return res.status(404).json({ message: 'Part not found' });
+    }
+
+    const result = await pool.query(
+      `
+        SELECT id, part_id, make, model, year_from, year_to, notes, created_at
+        FROM vehicle_compatibility
+        WHERE part_id = $1
+        ORDER BY id DESC
+      `,
+      [partId]
+    );
+
+    return res.json({ message: 'Compatibility fetched successfully', items: result.rows });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch compatibility', error: error.message });
+  }
+});
+
+app.post('/api/inventory/stock/adjustments', requireAuth, requirePermission('inventory:write'), async (req, res) => {
+  const { partId, sectionId, quantityDelta, reason } = req.body || {};
+  const parsedPartId = toInteger(partId);
+  const parsedSectionId = toInteger(sectionId);
+  const parsedDelta = toInteger(quantityDelta);
+
+  if (!parsedPartId || !parsedDelta || !reason) {
+    return res.status(400).json({ message: 'partId, quantityDelta, and reason are required' });
+  }
+
+  if (sectionId !== undefined && sectionId !== null && !parsedSectionId) {
+    return res.status(400).json({ message: 'sectionId must be a valid integer' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    if (!(await partExists(parsedPartId, client))) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Part not found' });
+    }
+
+    if (parsedSectionId && !(await sectionExists(parsedSectionId, client))) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Section not found' });
+    }
+
+    await writeStockLedgerEntry({
+      client,
+      partId: parsedPartId,
+      sectionId: parsedSectionId,
+      transactionType: 'ADJUSTMENT',
+      quantityDelta: parsedDelta,
+      performedBy: req.user.userId,
+    });
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'INVENTORY_STOCK_ADJUSTMENT',
+      entityType: 'part',
+      entityId: parsedPartId,
+      newValue: { sectionId: parsedSectionId, quantityDelta: parsedDelta, reason },
+      ipAddress: req.ip,
+    });
+
+    await client.query('COMMIT');
+    return res.status(201).json({ message: 'Stock adjustment recorded successfully' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ message: 'Unable to record stock adjustment', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/inventory/stock/transfers', requireAuth, requirePermission('inventory:write'), async (req, res) => {
+  const { partId, fromSectionId, toSectionId, quantity, reason } = req.body || {};
+  const parsedPartId = toInteger(partId);
+  const parsedFromSectionId = toInteger(fromSectionId);
+  const parsedToSectionId = toInteger(toSectionId);
+  const parsedQuantity = toInteger(quantity);
+
+  if (!parsedPartId || !parsedFromSectionId || !parsedToSectionId || !parsedQuantity || !reason) {
+    return res.status(400).json({ message: 'partId, fromSectionId, toSectionId, quantity, and reason are required' });
+  }
+
+  if (parsedQuantity <= 0) {
+    return res.status(400).json({ message: 'quantity must be greater than zero' });
+  }
+
+  if (parsedFromSectionId === parsedToSectionId) {
+    return res.status(400).json({ message: 'fromSectionId and toSectionId cannot be the same' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    if (!(await partExists(parsedPartId, client))) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Part not found' });
+    }
+
+    if (!(await sectionExists(parsedFromSectionId, client)) || !(await sectionExists(parsedToSectionId, client))) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'From/to section not found' });
+    }
+
+    const fromSectionStock = await getPartStock(parsedPartId, parsedFromSectionId, client);
+    if (fromSectionStock < parsedQuantity) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Insufficient stock in fromSection' });
+    }
+
+    await writeStockLedgerEntry({
+      client,
+      partId: parsedPartId,
+      sectionId: parsedFromSectionId,
+      transactionType: 'TRANSFER',
+      quantityDelta: -parsedQuantity,
+      performedBy: req.user.userId,
+    });
+
+    await writeStockLedgerEntry({
+      client,
+      partId: parsedPartId,
+      sectionId: parsedToSectionId,
+      transactionType: 'TRANSFER',
+      quantityDelta: parsedQuantity,
+      performedBy: req.user.userId,
+    });
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'INVENTORY_STOCK_TRANSFER',
+      entityType: 'part',
+      entityId: parsedPartId,
+      newValue: {
+        fromSectionId: parsedFromSectionId,
+        toSectionId: parsedToSectionId,
+        quantity: parsedQuantity,
+        reason,
+      },
+      ipAddress: req.ip,
+    });
+
+    await client.query('COMMIT');
+    return res.status(201).json({ message: 'Stock transfer recorded successfully' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ message: 'Unable to record stock transfer', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/inventory/stock/low', requireAuth, requirePermission('inventory:read'), async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          p.id,
+          p.sku,
+          p.name,
+          p.reorder_threshold,
+          COALESCE(SUM(sl.quantity_delta), 0)::INTEGER AS current_stock,
+          (COALESCE(SUM(sl.quantity_delta), 0)::INTEGER <= p.reorder_threshold) AS low_stock
+        FROM parts p
+        LEFT JOIN stock_ledger sl ON sl.part_id = p.id
+        GROUP BY p.id
+        HAVING COALESCE(SUM(sl.quantity_delta), 0)::INTEGER <= p.reorder_threshold
+        ORDER BY current_stock ASC, p.name ASC
+      `
+    );
+
+    return res.json({ message: 'Low stock items fetched successfully', items: result.rows });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch low stock items', error: error.message });
+  }
+});
+
+function normalizeBillType(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function normalizePartyType(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function resolvePartyTypeForBillType(billType) {
+  if (billType === 'SALE') {
+    return 'CUSTOMER';
+  }
+  if (billType === 'PURCHASE') {
+    return 'SUPPLIER';
+  }
+  return null;
+}
+
+function generateBillNumber(billType) {
+  const suffix = Date.now().toString().slice(-8);
+  const prefix = billType === 'PURCHASE' ? 'PUR' : 'SAL';
+  return `${prefix}-${suffix}`;
+}
+
+function calculateBillTotals(items, tax, discount) {
+  const subtotal = items.reduce((sum, item) => sum + toMoney(item.unitPrice, 0) * toInteger(item.quantity), 0);
+  const normalizedTax = toMoney(tax, 0);
+  const normalizedDiscount = toMoney(discount, 0);
+  const total = subtotal + normalizedTax - normalizedDiscount;
+
+  return {
+    subtotal,
+    tax: normalizedTax,
+    discount: normalizedDiscount,
+    total,
+    amountDue: total,
+  };
+}
+
+async function calculateOutstandingFromLedger({ client, partyType, partyId }) {
+  const result = await client.query(
+    `
+      SELECT
+        COALESCE(SUM(total), 0) AS billed_total,
+        COALESCE(SUM(amount_paid), 0) AS paid_total
+      FROM bills
+      WHERE party_type = $1
+        AND party_id = $2
+        AND status IN ('CONFIRMED', 'PARTIALLY_PAID', 'PAID')
+    `,
+    [partyType, partyId]
+  );
+
+  const billedTotal = toMoney(result.rows[0].billed_total, 0);
+  const paidTotal = toMoney(result.rows[0].paid_total, 0);
+
+  return {
+    billedTotal,
+    paidTotal,
+    outstandingBalance: billedTotal - paidTotal,
+  };
+}
+
+async function validatePartyReference({ client, partyType, partyId }) {
+  const parsedPartyId = toInteger(partyId);
+  if (!parsedPartyId) {
+    return { valid: false, message: 'partyId is required' };
+  }
+
+  if (partyType === 'CUSTOMER') {
+    const result = await client.query('SELECT id FROM customers WHERE id = $1 LIMIT 1', [parsedPartyId]);
+    return result.rowCount > 0 ? { valid: true, partyId: parsedPartyId } : { valid: false, message: 'Customer not found' };
+  }
+
+  if (partyType === 'SUPPLIER') {
+    const result = await client.query('SELECT id FROM suppliers WHERE id = $1 LIMIT 1', [parsedPartyId]);
+    return result.rowCount > 0 ? { valid: true, partyId: parsedPartyId } : { valid: false, message: 'Supplier not found' };
+  }
+
+  return { valid: false, message: 'Invalid party type' };
+}
+
+async function updatePartyOutstandingBalance({ client, billType, partyType, partyId, amountDelta }) {
+  if (!amountDelta) {
+    return;
+  }
+
+  if (billType === 'SALE' && partyType === 'CUSTOMER') {
+    await client.query(
+      'UPDATE customers SET outstanding_balance = outstanding_balance + $1, updated_at = NOW() WHERE id = $2',
+      [amountDelta, partyId]
+    );
+    return;
+  }
+
+  if (billType === 'PURCHASE' && partyType === 'SUPPLIER') {
+    await client.query(
+      'UPDATE suppliers SET outstanding_balance = outstanding_balance + $1, updated_at = NOW() WHERE id = $2',
+      [amountDelta, partyId]
+    );
+  }
+}
+
+async function fetchBillWithItems(client, billId) {
+  const billResult = await client.query(
+    `
+      SELECT id, bill_type, bill_number, bill_date, party_id, party_type, subtotal, tax, discount, total,
+             amount_paid, amount_due, status, due_date, created_by, created_at
+      FROM bills
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [billId]
+  );
+
+  if (billResult.rowCount === 0) {
+    return null;
+  }
+
+  const itemsResult = await client.query(
+    `
+      SELECT bi.id, bi.part_id, p.sku, p.name, p.section_id, bi.quantity, bi.unit_price, bi.line_total
+      FROM bill_items bi
+      JOIN parts p ON p.id = bi.part_id
+      WHERE bi.bill_id = $1
+      ORDER BY bi.id ASC
+    `,
+    [billId]
+  );
+
+  const paymentsResult = await client.query(
+    `
+      SELECT id, amount, payment_mode, reference_number, paid_at, recorded_by
+      FROM payments
+      WHERE bill_id = $1
+      ORDER BY paid_at DESC
+    `,
+    [billId]
+  );
+
+  return {
+    bill: billResult.rows[0],
+    items: itemsResult.rows,
+    payments: paymentsResult.rows,
+  };
+}
+
+app.get('/api/billing/bills', requireAuth, requirePermission('billing:read'), async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT id, bill_number, bill_type, status, total, amount_due, created_at
+        FROM bills
+        ORDER BY id DESC
+        LIMIT 50
+      `
+    );
+
+    return res.json({
+      message: 'Billing list fetched successfully',
+      items: result.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch bills', error: error.message });
+  }
+});
+
+app.post('/api/billing/bills', requireAuth, requirePermission('billing:write'), async (req, res) => {
+  const {
+    billType,
+    partyType,
+    partyId,
+    billDate,
+    dueDate,
+    tax,
+    discount,
+    items,
+    billNumber,
+  } = req.body || {};
+
+  const normalizedBillType = normalizeBillType(billType);
+  const resolvedPartyType = resolvePartyTypeForBillType(normalizedBillType);
+  const normalizedPartyType = normalizePartyType(partyType) || resolvedPartyType;
+
+  if (!['PURCHASE', 'SALE'].includes(normalizedBillType)) {
+    return res.status(400).json({ message: 'billType must be PURCHASE or SALE' });
+  }
+
+  if (!resolvedPartyType || normalizedPartyType !== resolvedPartyType) {
+    return res.status(400).json({ message: 'partyType does not match billType expectations' });
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ message: 'At least one bill item is required' });
+  }
+
+  const normalizedItems = [];
+  for (const item of items) {
+    const parsedPartId = toInteger(item.partId);
+    const parsedQty = toInteger(item.quantity);
+    const parsedUnitPrice = toMoney(item.unitPrice, NaN);
+    if (!parsedPartId || !parsedQty || parsedQty <= 0 || Number.isNaN(parsedUnitPrice)) {
+      return res.status(400).json({ message: 'Each item requires valid partId, quantity (>0), and unitPrice' });
+    }
+
+    normalizedItems.push({
+      partId: parsedPartId,
+      quantity: parsedQty,
+      unitPrice: parsedUnitPrice,
+      lineTotal: parsedQty * parsedUnitPrice,
+    });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const partyValidation = await validatePartyReference({ client, partyType: normalizedPartyType, partyId });
+    if (!partyValidation.valid) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: partyValidation.message });
+    }
+
+    for (const item of normalizedItems) {
+      if (!(await partExists(item.partId, client))) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ message: `Part not found for partId ${item.partId}` });
+      }
+    }
+
+    const totals = calculateBillTotals(normalizedItems, tax, discount);
+
+    if (normalizedBillType === 'SALE' && normalizedPartyType === 'CUSTOMER') {
+      const customerResult = await client.query(
+        'SELECT id, credit_limit, outstanding_balance FROM customers WHERE id = $1 LIMIT 1',
+        [partyValidation.partyId]
+      );
+
+      if (customerResult.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ message: 'Customer not found' });
+      }
+
+      const customer = customerResult.rows[0];
+      const creditLimit = toMoney(customer.credit_limit, 0);
+      const currentOutstanding = toMoney(customer.outstanding_balance, 0);
+
+      if (creditLimit > 0 && currentOutstanding + totals.total > creditLimit) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          message: 'Credit limit exceeded for customer',
+          code: 'CREDIT_LIMIT_EXCEEDED',
+        });
+      }
+    }
+
+    const generatedBillNumber = billNumber ? String(billNumber).trim() : generateBillNumber(normalizedBillType);
+
+    const billResult = await client.query(
+      `
+        INSERT INTO bills (
+          bill_type, bill_number, bill_date, party_id, party_type,
+          subtotal, tax, discount, total, amount_paid, amount_due, status, due_date, created_by
+        )
+        VALUES ($1, $2, COALESCE($3, CURRENT_DATE), $4, $5, $6, $7, $8, $9, 0, $10, 'DRAFT', $11, $12)
+        RETURNING id, bill_type, bill_number, status, total, amount_due, created_at
+      `,
+      [
+        normalizedBillType,
+        generatedBillNumber,
+        billDate || null,
+        partyValidation.partyId,
+        normalizedPartyType,
+        totals.subtotal,
+        totals.tax,
+        totals.discount,
+        totals.total,
+        totals.amountDue,
+        dueDate || null,
+        req.user.userId,
+      ]
+    );
+
+    const bill = billResult.rows[0];
+
+    for (const item of normalizedItems) {
+      await client.query(
+        `
+          INSERT INTO bill_items (bill_id, part_id, quantity, unit_price, line_total)
+          VALUES ($1, $2, $3, $4, $5)
+        `,
+        [bill.id, item.partId, item.quantity, item.unitPrice, item.lineTotal]
+      );
+    }
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'BILL_DRAFT_CREATED',
+      entityType: 'bill',
+      entityId: bill.id,
+      newValue: { billType: normalizedBillType, partyType: normalizedPartyType, total: bill.total },
+      ipAddress: req.ip,
+    });
+
+    await client.query('COMMIT');
+    return res.status(201).json({ message: 'Bill draft created successfully', bill });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'Bill number already exists' });
+    }
+    return res.status(500).json({ message: 'Unable to create bill draft', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/billing/bills/:id', requireAuth, requirePermission('billing:read'), async (req, res) => {
+  const billId = toInteger(req.params.id);
+  if (!billId) {
+    return res.status(400).json({ message: 'Invalid bill id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const data = await fetchBillWithItems(client, billId);
+    if (!data) {
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+
+    return res.json({ message: 'Bill detail fetched successfully', ...data });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch bill detail', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/billing/bills/:id/confirm', requireAuth, requirePermission('billing:write'), async (req, res) => {
+  const billId = toInteger(req.params.id);
+  if (!billId) {
+    return res.status(400).json({ message: 'Invalid bill id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const billLockResult = await client.query(
+      'SELECT * FROM bills WHERE id = $1 FOR UPDATE',
+      [billId]
+    );
+
+    if (billLockResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+
+    const bill = billLockResult.rows[0];
+    if (bill.status !== 'DRAFT') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Only DRAFT bills can be confirmed' });
+    }
+
+    const itemsResult = await client.query(
+      `
+        SELECT bi.id, bi.part_id, bi.quantity, p.section_id
+        FROM bill_items bi
+        JOIN parts p ON p.id = bi.part_id
+        WHERE bi.bill_id = $1
+      `,
+      [billId]
+    );
+
+    if (itemsResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Cannot confirm bill without items' });
+    }
+
+    const isSale = bill.bill_type === 'SALE';
+
+    for (const item of itemsResult.rows) {
+      if (isSale) {
+        const availableStock = await getPartStock(item.part_id, null, client);
+        if (availableStock < item.quantity) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ message: `Insufficient stock for part ${item.part_id}` });
+        }
+      }
+
+      await writeStockLedgerEntry({
+        client,
+        partId: item.part_id,
+        sectionId: item.section_id,
+        transactionType: bill.bill_type,
+        quantityDelta: isSale ? -item.quantity : item.quantity,
+        referenceId: bill.id,
+        performedBy: req.user.userId,
+      });
+    }
+
+    await client.query(
+      `
+        UPDATE bills
+        SET status = 'CONFIRMED'
+        WHERE id = $1
+      `,
+      [bill.id]
+    );
+
+    await updatePartyOutstandingBalance({
+      client,
+      billType: bill.bill_type,
+      partyType: bill.party_type,
+      partyId: bill.party_id,
+      amountDelta: toMoney(bill.total, 0),
+    });
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'BILL_CONFIRMED',
+      entityType: 'bill',
+      entityId: bill.id,
+      newValue: { billType: bill.bill_type, total: bill.total },
+      ipAddress: req.ip,
+    });
+
+    await client.query('COMMIT');
+    return res.json({ message: 'Bill confirmed successfully' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ message: 'Unable to confirm bill', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/billing/bills/:id/payments', requireAuth, requirePermission('billing:write'), async (req, res) => {
+  const billId = toInteger(req.params.id);
+  const { amount, paymentMode, referenceNumber } = req.body || {};
+  const normalizedAmount = toMoney(amount, NaN);
+  const normalizedMode = String(paymentMode || '').trim().toUpperCase();
+
+  if (!billId) {
+    return res.status(400).json({ message: 'Invalid bill id' });
+  }
+  if (Number.isNaN(normalizedAmount) || normalizedAmount <= 0) {
+    return res.status(400).json({ message: 'amount must be a positive number' });
+  }
+  if (!['CASH', 'UPI', 'BANK', 'CHEQUE'].includes(normalizedMode)) {
+    return res.status(400).json({ message: 'paymentMode must be CASH, UPI, BANK, or CHEQUE' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const billResult = await client.query('SELECT * FROM bills WHERE id = $1 FOR UPDATE', [billId]);
+    if (billResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+
+    const bill = billResult.rows[0];
+    if (!['CONFIRMED', 'PARTIALLY_PAID'].includes(bill.status)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Payments allowed only for CONFIRMED or PARTIALLY_PAID bills' });
+    }
+
+    const remainingDue = toMoney(bill.amount_due, 0);
+    if (normalizedAmount > remainingDue) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Payment amount cannot exceed amount due' });
+    }
+
+    await client.query(
+      `
+        INSERT INTO payments (bill_id, amount, payment_mode, reference_number, recorded_by)
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [bill.id, normalizedAmount, normalizedMode, referenceNumber || null, req.user.userId]
+    );
+
+    const updatedAmountPaid = toMoney(bill.amount_paid, 0) + normalizedAmount;
+    const updatedAmountDue = toMoney(bill.total, 0) - updatedAmountPaid;
+    const nextStatus = updatedAmountDue <= 0 ? 'PAID' : 'PARTIALLY_PAID';
+
+    await client.query(
+      `
+        UPDATE bills
+        SET amount_paid = $1,
+            amount_due = $2,
+            status = $3
+        WHERE id = $4
+      `,
+      [updatedAmountPaid, updatedAmountDue, nextStatus, bill.id]
+    );
+
+    await updatePartyOutstandingBalance({
+      client,
+      billType: bill.bill_type,
+      partyType: bill.party_type,
+      partyId: bill.party_id,
+      amountDelta: -normalizedAmount,
+    });
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'BILL_PAYMENT_RECORDED',
+      entityType: 'bill',
+      entityId: bill.id,
+      newValue: { amount: normalizedAmount, paymentMode: normalizedMode, status: nextStatus },
+      ipAddress: req.ip,
+    });
+
+    await client.query('COMMIT');
+    return res.status(201).json({
+      message: 'Payment recorded successfully',
+      bill: {
+        id: bill.id,
+        status: nextStatus,
+        amount_paid: updatedAmountPaid,
+        amount_due: updatedAmountDue,
+      },
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ message: 'Unable to record payment', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/billing/bills/:id/cancel', requireAuth, requirePermission('billing:write'), async (req, res) => {
+  const billId = toInteger(req.params.id);
+  if (!billId) {
+    return res.status(400).json({ message: 'Invalid bill id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const billResult = await client.query('SELECT * FROM bills WHERE id = $1 FOR UPDATE', [billId]);
+    if (billResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+
+    const bill = billResult.rows[0];
+    if (bill.status === 'CANCELLED') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Bill is already cancelled' });
+    }
+
+    if (toMoney(bill.amount_paid, 0) > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Cannot cancel bill with recorded payments' });
+    }
+
+    if (!['DRAFT', 'CONFIRMED'].includes(bill.status)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: `Cannot cancel bill in ${bill.status} state` });
+    }
+
+    if (bill.status === 'CONFIRMED') {
+      const itemsResult = await client.query(
+        `
+          SELECT bi.part_id, bi.quantity, p.section_id
+          FROM bill_items bi
+          JOIN parts p ON p.id = bi.part_id
+          WHERE bi.bill_id = $1
+        `,
+        [bill.id]
+      );
+
+      for (const item of itemsResult.rows) {
+        const reverseDelta = bill.bill_type === 'SALE' ? item.quantity : -item.quantity;
+        await writeStockLedgerEntry({
+          client,
+          partId: item.part_id,
+          sectionId: item.section_id,
+          transactionType: 'ADJUSTMENT',
+          quantityDelta: reverseDelta,
+          referenceId: bill.id,
+          performedBy: req.user.userId,
+        });
+      }
+
+      await updatePartyOutstandingBalance({
+        client,
+        billType: bill.bill_type,
+        partyType: bill.party_type,
+        partyId: bill.party_id,
+        amountDelta: -toMoney(bill.total, 0),
+      });
+    }
+
+    await client.query(
+      `
+        UPDATE bills
+        SET status = 'CANCELLED',
+            amount_due = 0
+        WHERE id = $1
+      `,
+      [bill.id]
+    );
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'BILL_CANCELLED',
+      entityType: 'bill',
+      entityId: bill.id,
+      newValue: { previousStatus: bill.status },
+      ipAddress: req.ip,
+    });
+
+    await client.query('COMMIT');
+    return res.json({ message: 'Bill cancelled successfully' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ message: 'Unable to cancel bill', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/billing/bills/:id/invoice', requireAuth, requirePermission('billing:read'), async (req, res) => {
+  const billId = toInteger(req.params.id);
+  if (!billId) {
+    return res.status(400).json({ message: 'Invalid bill id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const data = await fetchBillWithItems(client, billId);
+    if (!data) {
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+
+    const { bill, items } = data;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="invoice-${bill.bill_number}.pdf"`);
+
+    const doc = new PDFDocument({ margin: 50 });
+    doc.pipe(res);
+
+    doc.fontSize(20).text('SIBMS Invoice', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12).text(`Bill Number: ${bill.bill_number}`);
+    doc.text(`Bill Type: ${bill.bill_type}`);
+    doc.text(`Status: ${bill.status}`);
+    doc.text(`Bill Date: ${bill.bill_date}`);
+    doc.text(`Party Type: ${bill.party_type}`);
+    doc.text(`Party ID: ${bill.party_id}`);
+    doc.moveDown();
+
+    doc.fontSize(13).text('Items');
+    doc.moveDown(0.5);
+    for (const item of items) {
+      doc
+        .fontSize(11)
+        .text(`${item.name} (${item.sku})  Qty: ${item.quantity}  Unit: ${item.unit_price}  Line: ${item.line_total}`);
+    }
+
+    doc.moveDown();
+    doc.fontSize(12).text(`Subtotal: ${bill.subtotal}`);
+    doc.text(`Tax: ${bill.tax}`);
+    doc.text(`Discount: ${bill.discount}`);
+    doc.text(`Total: ${bill.total}`);
+    doc.text(`Amount Paid: ${bill.amount_paid}`);
+    doc.text(`Amount Due: ${bill.amount_due}`);
+
+    doc.end();
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to generate invoice PDF', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/parties/customers', requireAuth, requirePermission('customers:write'), async (req, res) => {
+  const { name, phone, email, address, creditLimit } = req.body || {};
+
+  if (!name) {
+    return res.status(400).json({ message: 'Customer name is required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO customers (name, phone, email, address, credit_limit)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, name, phone, email, address, credit_limit, outstanding_balance, created_at, updated_at
+      `,
+      [String(name).trim(), phone || null, email || null, address || null, toMoney(creditLimit, 0)]
+    );
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'CUSTOMER_CREATED',
+      entityType: 'customer',
+      entityId: result.rows[0].id,
+      newValue: { name: result.rows[0].name, email: result.rows[0].email },
+      ipAddress: req.ip,
+    });
+
+    return res.status(201).json({ message: 'Customer created successfully', customer: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to create customer', error: error.message });
+  }
+});
+
+app.get('/api/parties/customers', requireAuth, requirePermission('customers:read'), async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT id, name, phone, email, address, credit_limit, outstanding_balance, created_at, updated_at
+        FROM customers
+        ORDER BY id DESC
+        LIMIT 50
+      `
+    );
+
+    return res.json({
+      message: 'Customers fetched successfully',
+      items: result.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch customers', error: error.message });
+  }
+});
+
+app.get('/api/parties/customers/:id', requireAuth, requirePermission('customers:read'), async (req, res) => {
+  const customerId = toInteger(req.params.id);
+  if (!customerId) {
+    return res.status(400).json({ message: 'Invalid customer id' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT id, name, phone, email, address, credit_limit, outstanding_balance, created_at, updated_at
+        FROM customers
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [customerId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+
+    return res.json({ message: 'Customer fetched successfully', customer: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch customer', error: error.message });
+  }
+});
+
+app.put('/api/parties/customers/:id', requireAuth, requirePermission('customers:write'), async (req, res) => {
+  const customerId = toInteger(req.params.id);
+  const { name, phone, email, address, creditLimit } = req.body || {};
+
+  if (!customerId) {
+    return res.status(400).json({ message: 'Invalid customer id' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        UPDATE customers
+        SET
+          name = COALESCE($1, name),
+          phone = $2,
+          email = $3,
+          address = $4,
+          credit_limit = COALESCE($5, credit_limit),
+          updated_at = NOW()
+        WHERE id = $6
+        RETURNING id, name, phone, email, address, credit_limit, outstanding_balance, created_at, updated_at
+      `,
+      [name ? String(name).trim() : null, phone || null, email || null, address || null, creditLimit !== undefined ? toMoney(creditLimit, 0) : null, customerId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'CUSTOMER_UPDATED',
+      entityType: 'customer',
+      entityId: customerId,
+      newValue: { name: result.rows[0].name },
+      ipAddress: req.ip,
+    });
+
+    return res.json({ message: 'Customer updated successfully', customer: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to update customer', error: error.message });
+  }
+});
+
+app.delete('/api/parties/customers/:id', requireAuth, requirePermission('customers:write'), async (req, res) => {
+  const customerId = toInteger(req.params.id);
+  if (!customerId) {
+    return res.status(400).json({ message: 'Invalid customer id' });
+  }
+
+  try {
+    const result = await pool.query('DELETE FROM customers WHERE id = $1 RETURNING id', [customerId]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'CUSTOMER_DELETED',
+      entityType: 'customer',
+      entityId: customerId,
+      ipAddress: req.ip,
+    });
+
+    return res.json({ message: 'Customer deleted successfully' });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to delete customer', error: error.message });
+  }
+});
+
+app.get('/api/parties/customers/:id/outstanding', requireAuth, requirePermission('customers:read'), async (req, res) => {
+  const customerId = toInteger(req.params.id);
+  if (!customerId) {
+    return res.status(400).json({ message: 'Invalid customer id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const customerResult = await client.query(
+      'SELECT id, name, credit_limit, outstanding_balance FROM customers WHERE id = $1 LIMIT 1',
+      [customerId]
+    );
+
+    if (customerResult.rowCount === 0) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+
+    const summary = await calculateOutstandingFromLedger({ client, partyType: 'CUSTOMER', partyId: customerId });
+
+    return res.json({
+      message: 'Customer outstanding summary fetched successfully',
+      summary: {
+        customerId,
+        customerName: customerResult.rows[0].name,
+        creditLimit: toMoney(customerResult.rows[0].credit_limit, 0),
+        storedOutstanding: toMoney(customerResult.rows[0].outstanding_balance, 0),
+        calculatedOutstanding: summary.outstandingBalance,
+        billedTotal: summary.billedTotal,
+        paidTotal: summary.paidTotal,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch outstanding summary', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/parties/customers/:id/history', requireAuth, requirePermission('customers:read'), async (req, res) => {
+  const customerId = toInteger(req.params.id);
+  if (!customerId) {
+    return res.status(400).json({ message: 'Invalid customer id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const customerResult = await client.query(
+      'SELECT id, name, email, phone, outstanding_balance FROM customers WHERE id = $1 LIMIT 1',
+      [customerId]
+    );
+
+    if (customerResult.rowCount === 0) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+
+    const billsResult = await client.query(
+      `
+        SELECT id, bill_number, bill_type, bill_date, status, total, amount_paid, amount_due, created_at
+        FROM bills
+        WHERE party_type = 'CUSTOMER' AND party_id = $1
+        ORDER BY id DESC
+      `,
+      [customerId]
+    );
+
+    const paymentsResult = await client.query(
+      `
+        SELECT p.id, p.bill_id, b.bill_number, p.amount, p.payment_mode, p.reference_number, p.paid_at
+        FROM payments p
+        JOIN bills b ON b.id = p.bill_id
+        WHERE b.party_type = 'CUSTOMER' AND b.party_id = $1
+        ORDER BY p.paid_at DESC
+      `,
+      [customerId]
+    );
+
+    return res.json({
+      message: 'Customer history fetched successfully',
+      customer: customerResult.rows[0],
+      bills: billsResult.rows,
+      payments: paymentsResult.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch customer history', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/parties/suppliers', requireAuth, requirePermission('customers:write'), async (req, res) => {
+  const { name, phone, email, address } = req.body || {};
+  if (!name) {
+    return res.status(400).json({ message: 'Supplier name is required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO suppliers (name, phone, email, address)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, name, phone, email, address, outstanding_balance, created_at, updated_at
+      `,
+      [String(name).trim(), phone || null, email || null, address || null]
+    );
+
+    return res.status(201).json({ message: 'Supplier created successfully', supplier: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to create supplier', error: error.message });
+  }
+});
+
+app.get('/api/parties/suppliers', requireAuth, requirePermission('customers:read'), async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT id, name, phone, email, address, outstanding_balance, created_at, updated_at
+        FROM suppliers
+        ORDER BY id DESC
+        LIMIT 50
+      `
+    );
+
+    return res.json({ message: 'Suppliers fetched successfully', items: result.rows });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch suppliers', error: error.message });
+  }
+});
+
+app.get('/api/parties/suppliers/:id', requireAuth, requirePermission('customers:read'), async (req, res) => {
+  const supplierId = toInteger(req.params.id);
+  if (!supplierId) {
+    return res.status(400).json({ message: 'Invalid supplier id' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT id, name, phone, email, address, outstanding_balance, created_at, updated_at
+        FROM suppliers
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [supplierId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Supplier not found' });
+    }
+
+    return res.json({ message: 'Supplier fetched successfully', supplier: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch supplier', error: error.message });
+  }
+});
+
+app.put('/api/parties/suppliers/:id', requireAuth, requirePermission('customers:write'), async (req, res) => {
+  const supplierId = toInteger(req.params.id);
+  const { name, phone, email, address } = req.body || {};
+  if (!supplierId) {
+    return res.status(400).json({ message: 'Invalid supplier id' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        UPDATE suppliers
+        SET
+          name = COALESCE($1, name),
+          phone = $2,
+          email = $3,
+          address = $4,
+          updated_at = NOW()
+        WHERE id = $5
+        RETURNING id, name, phone, email, address, outstanding_balance, created_at, updated_at
+      `,
+      [name ? String(name).trim() : null, phone || null, email || null, address || null, supplierId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Supplier not found' });
+    }
+
+    return res.json({ message: 'Supplier updated successfully', supplier: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to update supplier', error: error.message });
+  }
+});
+
+app.delete('/api/parties/suppliers/:id', requireAuth, requirePermission('customers:write'), async (req, res) => {
+  const supplierId = toInteger(req.params.id);
+  if (!supplierId) {
+    return res.status(400).json({ message: 'Invalid supplier id' });
+  }
+
+  try {
+    const result = await pool.query('DELETE FROM suppliers WHERE id = $1 RETURNING id', [supplierId]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Supplier not found' });
+    }
+
+    return res.json({ message: 'Supplier deleted successfully' });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to delete supplier', error: error.message });
+  }
+});
+
+app.get('/api/parties/suppliers/:id/outstanding', requireAuth, requirePermission('customers:read'), async (req, res) => {
+  const supplierId = toInteger(req.params.id);
+  if (!supplierId) {
+    return res.status(400).json({ message: 'Invalid supplier id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const supplierResult = await client.query(
+      'SELECT id, name, outstanding_balance FROM suppliers WHERE id = $1 LIMIT 1',
+      [supplierId]
+    );
+
+    if (supplierResult.rowCount === 0) {
+      return res.status(404).json({ message: 'Supplier not found' });
+    }
+
+    const summary = await calculateOutstandingFromLedger({ client, partyType: 'SUPPLIER', partyId: supplierId });
+
+    return res.json({
+      message: 'Supplier outstanding summary fetched successfully',
+      summary: {
+        supplierId,
+        supplierName: supplierResult.rows[0].name,
+        storedOutstanding: toMoney(supplierResult.rows[0].outstanding_balance, 0),
+        calculatedOutstanding: summary.outstandingBalance,
+        billedTotal: summary.billedTotal,
+        paidTotal: summary.paidTotal,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch supplier outstanding summary', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/notifications/templates', requireAuth, requirePermission('billing:read'), async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT id, name, channel, subject, body, is_active, created_at, updated_at
+        FROM notification_templates
+        ORDER BY id DESC
+      `
+    );
+
+    return res.json({ message: 'Notification templates fetched successfully', items: result.rows });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch notification templates', error: error.message });
+  }
+});
+
+app.post('/api/notifications/templates', requireAuth, requirePermission('billing:write'), async (req, res) => {
+  const validation = normalizeTemplatePayload(req.body || {});
+  if (!validation.valid) {
+    return res.status(400).json({ message: validation.message });
+  }
+
+  const payload = validation.normalized;
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO notification_templates (name, channel, subject, body, is_active)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, name, channel, subject, body, is_active, created_at, updated_at
+      `,
+      [payload.name, payload.channel, payload.subject, payload.body, payload.isActive]
+    );
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'NOTIFICATION_TEMPLATE_CREATED',
+      entityType: 'notification_template',
+      entityId: result.rows[0].id,
+      newValue: { name: payload.name, channel: payload.channel },
+      ipAddress: req.ip,
+    });
+
+    return res.status(201).json({ message: 'Notification template created successfully', template: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'Template name already exists' });
+    }
+    return res.status(500).json({ message: 'Unable to create notification template', error: error.message });
+  }
+});
+
+app.put('/api/notifications/templates/:id', requireAuth, requirePermission('billing:write'), async (req, res) => {
+  const templateId = toInteger(req.params.id);
+  if (!templateId) {
+    return res.status(400).json({ message: 'Invalid template id' });
+  }
+
+  const body = req.body || {};
+  const channel = body.channel === undefined ? null : normalizeNotificationChannel(body.channel);
+  if (channel && !NOTIFICATION_CHANNELS.includes(channel)) {
+    return res.status(400).json({ message: 'channel must be one of SMS, WHATSAPP, EMAIL, INTERNAL' });
+  }
+
+  if (body.name !== undefined && !String(body.name).trim()) {
+    return res.status(400).json({ message: 'name cannot be empty' });
+  }
+
+  if (body.body !== undefined && !String(body.body).trim()) {
+    return res.status(400).json({ message: 'body cannot be empty' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        UPDATE notification_templates
+        SET
+          name = COALESCE($1, name),
+          channel = COALESCE($2, channel),
+          subject = COALESCE($3, subject),
+          body = COALESCE($4, body),
+          is_active = COALESCE($5, is_active),
+          updated_at = NOW()
+        WHERE id = $6
+        RETURNING id, name, channel, subject, body, is_active, created_at, updated_at
+      `,
+      [
+        body.name !== undefined ? String(body.name).trim() : null,
+        channel,
+        body.subject !== undefined ? String(body.subject || '').trim() : null,
+        body.body !== undefined ? String(body.body) : null,
+        body.isActive !== undefined ? toBoolean(body.isActive) : null,
+        templateId,
+      ]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Notification template not found' });
+    }
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'NOTIFICATION_TEMPLATE_UPDATED',
+      entityType: 'notification_template',
+      entityId: templateId,
+      ipAddress: req.ip,
+    });
+
+    return res.json({ message: 'Notification template updated successfully', template: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'Template name already exists' });
+    }
+    return res.status(500).json({ message: 'Unable to update notification template', error: error.message });
+  }
+});
+
+app.post('/api/notifications/reminders/generate', requireAuth, requirePermission('billing:write'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const summary = await generateBillReminderJobs({
+      client,
+      daysAhead: req.body?.daysAhead,
+      includeOverdue: req.body?.includeOverdue,
+      createdBy: req.user.userId,
+    });
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'NOTIFICATION_REMINDERS_GENERATED',
+      entityType: 'notification_job',
+      newValue: summary,
+      ipAddress: req.ip,
+    });
+
+    await client.query('COMMIT');
+    return res.status(201).json({ message: 'Reminder jobs generated successfully', summary });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ message: 'Unable to generate reminder jobs', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/notifications/reminders/dispatch', requireAuth, requirePermission('billing:write'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const summary = await dispatchPendingNotificationJobs({
+      client,
+      limit: req.body?.limit,
+      actorUserId: req.user.userId,
+    });
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'NOTIFICATION_REMINDERS_DISPATCHED',
+      entityType: 'notification_job',
+      newValue: summary,
+      ipAddress: req.ip,
+    });
+
+    await client.query('COMMIT');
+    return res.json({ message: 'Reminder dispatch completed', summary });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ message: 'Unable to dispatch reminder jobs', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/notifications/jobs', requireAuth, requirePermission('billing:read'), async (req, res) => {
+  const status = req.query.status ? String(req.query.status).trim().toUpperCase() : null;
+  const limit = Math.min(Math.max(toInteger(req.query.limit) || 50, 1), 200);
+
+  if (status && !NOTIFICATION_JOB_STATUSES.includes(status)) {
+    return res.status(400).json({ message: 'Invalid status filter' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          id,
+          job_type,
+          bill_id,
+          party_type,
+          party_id,
+          recipient_name,
+          due_date,
+          outstanding_amount,
+          status,
+          scheduled_for,
+          sent_at,
+          attempt_count,
+          last_error,
+          created_at,
+          updated_at
+        FROM notification_jobs
+        WHERE ($1::VARCHAR IS NULL OR status = $1)
+        ORDER BY id DESC
+        LIMIT $2
+      `,
+      [status, limit]
+    );
+
+    return res.json({ message: 'Notification jobs fetched successfully', items: result.rows });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch notification jobs', error: error.message });
+  }
+});
+
+app.get('/api/notifications/jobs/:id', requireAuth, requirePermission('billing:read'), async (req, res) => {
+  const jobId = toInteger(req.params.id);
+  if (!jobId) {
+    return res.status(400).json({ message: 'Invalid notification job id' });
+  }
+
+  try {
+    const jobResult = await pool.query(
+      `
+        SELECT
+          id,
+          job_type,
+          bill_id,
+          party_type,
+          party_id,
+          recipient_name,
+          recipient_phone,
+          recipient_email,
+          due_date,
+          outstanding_amount,
+          status,
+          scheduled_for,
+          sent_at,
+          attempt_count,
+          last_error,
+          payload,
+          created_at,
+          updated_at
+        FROM notification_jobs
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [jobId]
+    );
+
+    if (jobResult.rowCount === 0) {
+      return res.status(404).json({ message: 'Notification job not found' });
+    }
+
+    const logsResult = await pool.query(
+      `
+        SELECT id, channel, status, provider_message, payload, provider_response, created_at
+        FROM notification_delivery_logs
+        WHERE job_id = $1
+        ORDER BY id DESC
+      `,
+      [jobId]
+    );
+
+    return res.json({
+      message: 'Notification job detail fetched successfully',
+      job: jobResult.rows[0],
+      deliveries: logsResult.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch notification job detail', error: error.message });
+  }
+});
+
+app.post('/api/ai/voice/stt', requireAuth, requirePermission('inventory:read'), async (req, res) => {
+  const { audioBase64, mockTranscript } = req.body || {};
+
+  try {
+    const stt = await resolveSpeechToText({ audioBase64, mockTranscript });
+    if (stt.error) {
+      return res.status(stt.statusCode || 500).json({ message: stt.error });
+    }
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'VOICE_STT_REQUEST',
+      entityType: 'voice_agent',
+      newValue: { provider: stt.provider, mocked: stt.mocked },
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      message: 'Speech-to-text conversion completed',
+      transcript: stt.transcript,
+      provider: stt.provider,
+      mocked: stt.mocked,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to process speech input', error: error.message });
+  }
+});
+
+app.post('/api/ai/voice/query', requireAuth, requirePermission('inventory:read'), async (req, res) => {
+  const queryText = normalizeVoiceText(req.body?.queryText);
+  const limit = req.body?.limit;
+
+  if (!queryText) {
+    return res.status(400).json({ message: 'queryText is required' });
+  }
+
+  if (queryText.length < 2 || queryText.length > 280) {
+    return res.status(400).json({ message: 'queryText must be between 2 and 280 characters' });
+  }
+
+  if (containsUnsafeVoiceQuery(queryText)) {
+    return res.status(400).json({
+      message: 'Query violates guardrails. Ask only inventory/location lookup questions.',
+      code: 'VOICE_GUARDRAIL_BLOCKED',
+    });
+  }
+
+  try {
+    const intentResult = await resolveVoiceIntentWithFallback(queryText);
+    const matches = await queryVoicePartMatches({
+      searchTerm: intentResult.entities.searchTerm,
+      make: intentResult.entities.make,
+      model: intentResult.entities.model,
+      year: intentResult.entities.year,
+      limit,
+    });
+
+    const answer = buildVoiceQueryAnswer({
+      intent: intentResult.intent,
+      entities: intentResult.entities,
+      matches,
+    });
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'VOICE_QUERY_EXECUTED',
+      entityType: 'voice_agent',
+      newValue: {
+        queryText,
+        intent: intentResult.intent,
+        entityHints: intentResult.entities,
+        resultCount: matches.length,
+      },
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      message: 'Voice query processed successfully',
+      intent: {
+        name: intentResult.intent,
+        provider: intentResult.provider,
+        usedFallback: intentResult.usedFallback,
+      },
+      entities: intentResult.entities,
+      resultCount: matches.length,
+      items: matches,
+      answer,
+      fallback: matches.length === 0,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to process voice query', error: error.message });
   }
 });
 
@@ -168,6 +3017,7 @@ app.get('/api/health', async (_req, res) => {
 async function startServer() {
   try {
     await initializeSchema();
+    startNotificationWorker();
     app.listen(port, () => {
       console.log(`Server listening on http://localhost:${port}`);
     });
@@ -180,6 +3030,7 @@ async function startServer() {
 startServer();
 
 process.on('SIGINT', async () => {
+  stopNotificationWorker();
   await pool.end();
   process.exit(0);
 });
