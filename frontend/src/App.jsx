@@ -16,6 +16,7 @@ import {
   Activity,
   ListChecks,
   UserPlus,
+  FileText,
 } from 'lucide-react'
 import { motion as Motion } from 'motion/react'
 import { clearToken, getProfile, getSettings, getToken, login, logout, saveToken, updateSettings } from './auth'
@@ -28,6 +29,7 @@ import Settings from './components/Settings'
 import EmployeePage from './pages/modules/EmployeePage'
 import ActivityLogsPage from './pages/modules/ActivityLogsPage'
 import DemandLogsPage from './pages/modules/DemandLogsPage'
+import ReportsPage from './pages/modules/ReportsPage'
 
 function App() {
   const [authReady, setAuthReady] = useState(false)
@@ -45,6 +47,8 @@ function App() {
   const [settingsMessage, setSettingsMessage] = useState('')
   const [settingsError, setSettingsError] = useState('')
   const [activeTab, setActiveTab] = useState('billing')
+  const [isOnline, setIsOnline] = useState(navigator.onLine)
+  const [offlineQueueSize, setOfflineQueueSize] = useState(0)
 
   useEffect(() => {
     const loadProfile = async () => {
@@ -117,6 +121,35 @@ function App() {
     }
   }, [user])
 
+  // Track online/offline status and offline queue
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true)
+      console.log('[App] Device is online')
+    }
+
+    const handleOffline = () => {
+      setIsOnline(false)
+      console.log('[App] Device is offline')
+    }
+
+    const handleOfflineQueueSynced = (event) => {
+      const { detail } = event
+      console.log('[App] Offline queue synced:', detail)
+      setOfflineQueueSize(detail.remaining)
+    }
+
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    window.addEventListener('offlineQueueSynced', handleOfflineQueueSynced)
+
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+      window.removeEventListener('offlineQueueSynced', handleOfflineQueueSynced)
+    }
+  }, [])
+
   const saveSettings = async () => {
     setSettingsSaving(true)
     setSettingsError('')
@@ -169,6 +202,8 @@ function App() {
         return <ActivityLogsPage onBack={() => setActiveTab('dashboard')} />
       case 'demand':
         return <DemandLogsPage onBack={() => setActiveTab('dashboard')} />
+      case 'reports':
+        return <ReportsPage />
       case 'ai':
         return <AIAgent />
       case 'settings':
@@ -304,6 +339,7 @@ function App() {
           <SidebarItem icon={<UserPlus size={20} />} label="Employees" active={activeTab === 'employees'} onClick={() => setActiveTab('employees')} />
           <SidebarItem icon={<Activity size={20} />} label="Activity" active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} />
           <SidebarItem icon={<ListChecks size={20} />} label="Demand" active={activeTab === 'demand'} onClick={() => setActiveTab('demand')} />
+          <SidebarItem icon={<FileText size={20} />} label="Reports" active={activeTab === 'reports'} onClick={() => setActiveTab('reports')} />
           <div className="my-2 border-t border-outline-variant/10" />
           <SidebarItem icon={<Bot size={20} />} label="AI Agent" active={activeTab === 'ai'} onClick={() => setActiveTab('ai')} />
           <SidebarItem icon={<SettingsIcon size={20} />} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
@@ -363,6 +399,19 @@ function App() {
             </button>
           </div>
         </header>
+
+        {!isOnline && (
+          <div className="flex items-center justify-between border-b-2 border-warning bg-warning/10 px-8 py-3 text-warning">
+            <div className="flex items-center gap-3">
+              <div className="h-2 w-2 animate-pulse rounded-full bg-warning" />
+              <span className="font-semibold">You are currently offline</span>
+              {offlineQueueSize > 0 && (
+                <span className="ml-2 text-xs text-warning/80">({offlineQueueSize} pending actions)</span>
+              )}
+            </div>
+            <span className="text-xs text-warning/70">Your changes will sync when you're back online</span>
+          </div>
+        )}
 
         <div className="p-8 pb-16">
           <div className="mx-auto max-w-7xl">{renderContent()}</div>

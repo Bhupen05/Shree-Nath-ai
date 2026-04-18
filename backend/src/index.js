@@ -3648,6 +3648,493 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
+// ============================================================================
+// DASHBOARD ENHANCED KPIs ENDPOINT (PHASE 3)
+// ============================================================================
+
+app.get('/api/dashboard/kpis-enhanced', requireAuth, requirePermission('dashboard:read'), async (_req, res) => {
+  try {
+    // Total stock value (sum of all stock entries)
+    const stockValueResult = await pool.query(
+      `
+        SELECT COALESCE(SUM(se.quantity * se.cost_price), 0)::NUMERIC AS total_stock_value
+        FROM stock_entries se
+      `
+    );
+
+    // Pending bills value
+    const pendingBillsResult = await pool.query(
+      `
+        SELECT COALESCE(SUM(amount_due), 0)::NUMERIC AS pending_bills_value,
+               COUNT(*) AS pending_bills_count
+        FROM bills
+        WHERE status IN ('CONFIRMED', 'PARTIALLY_PAID', 'OVERDUE')
+      `
+    );
+
+    // Low stock products
+    const lowStockResult = await pool.query(
+      `
+        SELECT COUNT(*) AS low_stock_count
+        FROM parts p
+        LEFT JOIN stock_entries se ON p.id = se.part_id
+        GROUP BY p.id
+        HAVING COALESCE(SUM(se.quantity), 0) <= p.reorder_threshold
+      `
+    );
+
+    // Today's sales
+    const todaySalesResult = await pool.query(
+      `
+        SELECT COALESCE(SUM(total), 0)::NUMERIC AS today_sales,
+               COUNT(*) AS today_sales_count
+        FROM bills
+        WHERE bill_type = 'SALE'
+          AND DATE(bill_date) = CURRENT_DATE
+          AND status IN ('CONFIRMED', 'PARTIALLY_PAID', 'PAID')
+      `
+    );
+
+    // Top 10 products (by sales quantity in last 30 days)
+    const topProductsResult = await pool.query(
+      `
+        SELECT p.id, p.name, p.sku, COALESCE(SUM(bi.quantity), 0)::INTEGER AS sales_qty
+        FROM parts p
+        LEFT JOIN bill_items bi ON p.id = bi.part_id
+        LEFT JOIN bills b ON bi.bill_id = b.id AND b.bill_type = 'SALE'
+        WHERE b.bill_date >= CURRENT_DATE - INTERVAL '30 days' OR b.bill_date IS NULL
+        GROUP BY p.id, p.name, p.sku
+        ORDER BY sales_qty DESC
+        LIMIT 10
+      `
+    );
+
+    // Dead stock (no movement in 90+ days)
+    const deadStockResult = await pool.query(
+      `
+        SELECT COUNT(*) AS dead_stock_count
+        FROM parts p
+        WHERE NOT EXISTS (
+          SELECT 1 FROM bills b
+          JOIN bill_items bi ON b.id = bi.bill_id
+          WHERE bi.part_id = p.id
+            AND b.bill_type = 'SALE'
+            AND b.bill_date >= CURRENT_DATE - INTERVAL '90 days'
+        )
+      `
+    );
+
+    // Overdue bills summary
+    const overdueResult = await pool.query(
+      `
+        SELECT COUNT(*) AS overdue_count,
+               COALESCE(SUM(amount_due), 0)::NUMERIC AS overdue_amount
+        FROM bills
+        WHERE status IN ('CONFIRMED', 'PARTIALLY_PAID')
+          AND due_date < CURRENT_DATE
+      `
+    );
+
+    return res.json({
+      message: 'Enhanced dashboard KPIs fetched successfully',
+      kpis: {
+        totalStockValue: toMoney(stockValueResult.rows[0].total_stock_value, 0),
+        pendingBillsValue: toMoney(pendingBillsResult.rows[0].pending_bills_value, 0),
+        pendingBillsCount: toInteger(pendingBillsResult.rows[0].pending_bills_count),
+        lowStockCount: toInteger(lowStockResult.rows[0]?.low_stock_count || 0),
+        todaysSales: toMoney(todaySalesResult.rows[0].today_sales, 0),
+        todaysSalesCount: toInteger(todaySalesResult.rows[0].today_sales_count),
+        deadStockCount: toInteger(deadStockResult.rows[0].dead_stock_count),
+        overdueCount: toInteger(overdueResult.rows[0].overdue_count),
+        overdueAmount: toMoney(overdueResult.rows[0].overdue_amount, 0),
+        topProducts: topProductsResult.rows,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch enhanced dashboard KPIs', error: error.message });
+  }
+});
+
+// ============================================================================
+// SYSTEM AI FEATURES (PHASE 3)
+// ============================================================================
+
+app.get('/api/ai/reorder-suggestions', requireAuth, requirePermission('inventory:read'), async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          p.id,
+          p.sku,
+          p.name,
+          p.reorder_threshold,
+          COALESCE(SUM(se.quantity), 0)::INTEGER AS current_stock,
+          p.cost_price,
+          (p.reorder_threshold - COALESCE(SUM(se.quantity), 0))::INTEGER AS suggested_order_qty,
+          s.name AS supplier_name,
+          s.phone AS supplier_phone
+        FROM parts p
+        LEFT JOIN stock_entries se ON p.id = se.part_id
+        LEFT JOIN suppliers s ON se.supplier_id = s.id
+        WHERE COALESCE(SUM(se.quantity), 0) <= p.reorder_threshold
+        GROUP BY p.id, p.name, p.sku, p.cost_price, p.reorder_threshold, s.id, s.name, s.phone
+        ORDER BY current_stock ASC, p.name ASC
+        LIMIT 50
+      `
+    );
+
+    return res.json({
+      message: 'Reorder suggestions fetched successfully',
+      suggestions: result.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch reorder suggestions', error: error.message });
+  }
+});
+
+app.get('/api/ai/sales-trends', requireAuth, requirePermission('inventory:read'), async (req, res) => {
+  const days = Math.min(Math.max(toInteger(req.query.days) || 30, 1), 365);
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          p.id,
+          p.name,
+          p.sku,
+          COALESCE(SUM(bi.quantity), 0)::INTEGER AS total_qty_sold,
+          COALESCE(SUM(bi.line_total), 0)::NUMERIC AS total_revenue,
+          COUNT(DISTINCT b.id)::INTEGER AS transaction_count,
+          ROUND(AVG(bi.unit_price)::NUMERIC, 2) AS avg_price
+        FROM parts p
+        LEFT JOIN bill_items bi ON p.id = bi.part_id
+        LEFT JOIN bills b ON bi.bill_id = b.id
+        WHERE b.bill_type = 'SALE'
+          AND (b.bill_date IS NULL OR b.bill_date >= CURRENT_DATE - ($1::INTEGER * INTERVAL '1 day'))
+        GROUP BY p.id, p.name, p.sku
+        HAVING COALESCE(SUM(bi.quantity), 0) > 0
+        ORDER BY total_revenue DESC
+        LIMIT 20
+      `,
+      [days]
+    );
+
+    return res.json({
+      message: 'Sales trends fetched successfully',
+      trends: result.rows,
+      period: `Last ${days} days`,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch sales trends', error: error.message });
+  }
+});
+
+app.get('/api/ai/demand-forecast', requireAuth, requirePermission('inventory:read'), async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        WITH sales_30d AS (
+          SELECT
+            p.id,
+            p.name,
+            p.sku,
+            COALESCE(SUM(bi.quantity), 0)::INTEGER AS sales_qty_30d,
+            COALESCE(COUNT(DISTINCT DATE(b.bill_date)), 1)::INTEGER AS days_active
+          FROM parts p
+          LEFT JOIN bill_items bi ON p.id = bi.part_id
+          LEFT JOIN bills b ON bi.bill_id = b.id AND b.bill_type = 'SALE'
+          WHERE b.bill_date >= CURRENT_DATE - INTERVAL '30 days' OR b.bill_date IS NULL
+          GROUP BY p.id, p.name, p.sku
+        )
+        SELECT
+          id,
+          name,
+          sku,
+          sales_qty_30d,
+          GREATEST(1, (sales_qty_30d / NULLIF(days_active, 0)))::INTEGER AS daily_avg,
+          (GREATEST(1, (sales_qty_30d / NULLIF(days_active, 0))) * 30)::INTEGER AS projected_30d_demand
+        FROM sales_30d
+        WHERE sales_qty_30d > 0
+        ORDER BY projected_30d_demand DESC
+        LIMIT 30
+      `
+    );
+
+    return res.json({
+      message: 'Demand forecast fetched successfully',
+      forecast: result.rows,
+      period: 'Next 30 days',
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to generate demand forecast', error: error.message });
+  }
+});
+
+// ============================================================================
+// REPORTS API (PHASE 4)
+// ============================================================================
+
+app.get('/api/reports/stock', requireAuth, requirePermission('inventory:read'), async (req, res) => {
+  const { format = 'json', sectionId } = req.query;
+  const parsedSectionId = sectionId ? toInteger(sectionId) : null;
+
+  try {
+    let query = `
+      SELECT
+        p.id,
+        p.sku,
+        p.name,
+        p.cost_price,
+        p.selling_price,
+        p.reorder_threshold,
+        s.name AS section_name,
+        c.name AS cabinet_name,
+        r.name AS room_name,
+        COALESCE(SUM(se.quantity), 0)::INTEGER AS current_stock,
+        COALESCE(SUM(se.quantity * se.cost_price), 0)::NUMERIC AS stock_value,
+        (COALESCE(SUM(se.quantity), 0) <= p.reorder_threshold) AS is_low_stock
+      FROM parts p
+      LEFT JOIN sections s ON p.section_id = s.id
+      LEFT JOIN cabinets c ON s.cabinet_id = c.id
+      LEFT JOIN rooms r ON c.room_id = r.id
+      LEFT JOIN stock_entries se ON p.id = se.part_id
+    `;
+
+    const params = [];
+    if (parsedSectionId) {
+      params.push(parsedSectionId);
+      query += ` WHERE s.id = $${params.length}`;
+    }
+
+    query += `
+      GROUP BY p.id, p.sku, p.name, p.cost_price, p.selling_price, p.reorder_threshold, s.id, s.name, c.id, c.name, r.id, r.name
+      ORDER BY r.name, c.name, s.name, p.name
+    `;
+
+    const result = await pool.query(query, params);
+
+    if (format === 'csv') {
+      const csv = [
+        ['SKU', 'Name', 'Section', 'Cabinet', 'Room', 'Current Stock', 'Cost Price', 'Selling Price', 'Stock Value', 'Is Low Stock'].join(','),
+        ...result.rows.map((row) =>
+          [
+            row.sku,
+            row.name,
+            row.section_name || 'N/A',
+            row.cabinet_name || 'N/A',
+            row.room_name || 'N/A',
+            row.current_stock,
+            row.cost_price,
+            row.selling_price,
+            row.stock_value || 0,
+            row.is_low_stock ? 'Yes' : 'No',
+          ].join(',')
+        ),
+      ].join('\n');
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="stock-report.csv"');
+      return res.send(csv);
+    }
+
+    return res.json({
+      message: 'Stock report fetched successfully',
+      report: result.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to generate stock report', error: error.message });
+  }
+});
+
+app.get('/api/reports/sales', requireAuth, requirePermission('billing:read'), async (req, res) => {
+  const { format = 'json', startDate, endDate } = req.query;
+
+  let dateCondition = 'AND b.bill_date IS NOT NULL';
+  const params = [];
+
+  if (startDate) {
+    params.push(startDate);
+    dateCondition += ` AND b.bill_date >= $${params.length}`;
+  }
+  if (endDate) {
+    params.push(endDate);
+    dateCondition += ` AND b.bill_date <= $${params.length}`;
+  }
+
+  try {
+    const query = `
+      SELECT
+        b.id,
+        b.bill_number,
+        b.bill_date,
+        b.party_type,
+        CASE
+          WHEN b.party_type = 'CUSTOMER' THEN c.name
+          ELSE s.name
+        END AS party_name,
+        b.subtotal,
+        b.tax,
+        b.discount,
+        b.total,
+        b.amount_paid,
+        b.amount_due,
+        b.status,
+        (SELECT STRING_AGG(p.name || ' (x' || bi.quantity || ')', ', ')
+         FROM bill_items bi
+         JOIN parts p ON bi.part_id = p.id
+         WHERE bi.bill_id = b.id) AS items_summary
+      FROM bills b
+      LEFT JOIN customers c ON b.party_type = 'CUSTOMER' AND b.party_id = c.id
+      LEFT JOIN suppliers s ON b.party_type = 'SUPPLIER' AND b.party_id = s.id
+      WHERE b.bill_type = 'SALE'
+        ${dateCondition}
+      ORDER BY b.bill_date DESC
+    `;
+
+    const result = await pool.query(query, params);
+
+    if (format === 'csv') {
+      const csv = [
+        ['Bill Number', 'Date', 'Party Type', 'Party Name', 'Subtotal', 'Tax', 'Discount', 'Total', 'Amount Paid', 'Amount Due', 'Status', 'Items'].join(','),
+        ...result.rows.map((row) =>
+          [
+            row.bill_number,
+            row.bill_date,
+            row.party_type,
+            row.party_name || 'N/A',
+            row.subtotal,
+            row.tax,
+            row.discount,
+            row.total,
+            row.amount_paid,
+            row.amount_due,
+            row.status,
+            `"${row.items_summary || 'N/A'}"`,
+          ].join(',')
+        ),
+      ].join('\n');
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="sales-report.csv"');
+      return res.send(csv);
+    }
+
+    return res.json({
+      message: 'Sales report fetched successfully',
+      report: result.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to generate sales report', error: error.message });
+  }
+});
+
+// ============================================================================
+// TWILIO VOICE AI WEBHOOK (PHASE 4)
+// ============================================================================
+
+app.post('/api/ai/voice/webhook/inbound', async (req, res) => {
+  // Twilio webhook handler - processes inbound voice calls
+  // In development: accept and simulate; in production: integrate with Twilio SDK
+  const { From, To, CallSid } = req.body || {};
+
+  if (!CallSid) {
+    return res.status(400).json({ message: 'Missing CallSid from Twilio' });
+  }
+
+  try {
+    // Log demand entry for incoming call
+    await pool.query(
+      `
+        INSERT INTO demand_logs (source, query_text, caller_phone, fulfilled)
+        VALUES ('VOICE_CALL', $1, $2, FALSE)
+      `,
+      [`Inbound voice call: ${From || 'Unknown'}`, From || 'Unknown']
+    );
+
+    // Return TwiML response
+    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+      <Say>Hello! Welcome to SIBMS Voice Agent. Please describe what auto part you need.</Say>
+      <Gather numDigits="1" action="/api/ai/voice/webhook/process" method="POST">
+        <Say>Or press 1 to list popular parts.</Say>
+      </Gather>
+    </Response>`;
+
+    res.setHeader('Content-Type', 'application/xml');
+    return res.send(twimlResponse);
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to process voice webhook', error: error.message });
+  }
+});
+
+// ============================================================================
+// BARCODE/QR SCANNING SUPPORT ENDPOINT (PHASE 3)
+// ============================================================================
+
+app.post('/api/barcode/lookup', requireAuth, requirePermission('inventory:read'), async (req, res) => {
+  const { barcode, sku } = req.body || {};
+  const searchValue = barcode || sku;
+
+  if (!searchValue) {
+    return res.status(400).json({ message: 'barcode or sku is required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          p.id,
+          p.sku,
+          p.name,
+          p.description,
+          p.cost_price,
+          p.selling_price,
+          p.reorder_threshold,
+          COALESCE(SUM(se.quantity), 0)::INTEGER AS current_stock,
+          s.id AS section_id,
+          s.name AS section_name,
+          c.name AS cabinet_name,
+          r.name AS room_name
+        FROM parts p
+        LEFT JOIN stock_entries se ON p.id = se.part_id
+        LEFT JOIN sections s ON p.section_id = s.id
+        LEFT JOIN cabinets c ON s.cabinet_id = c.id
+        LEFT JOIN rooms r ON c.room_id = r.id
+        WHERE p.sku ILIKE $1 OR p.name ILIKE $1
+        GROUP BY p.id, p.sku, p.name, p.description, p.cost_price, p.selling_price, p.reorder_threshold, s.id, s.name, c.id, c.name, r.id, r.name
+        LIMIT 1
+      `,
+      [`%${searchValue}%`]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Product not found for barcode/SKU', code: 'PRODUCT_NOT_FOUND' });
+    }
+
+    const part = result.rows[0];
+    return res.json({
+      message: 'Product found via barcode/SKU lookup',
+      product: {
+        id: part.id,
+        sku: part.sku,
+        name: part.name,
+        description: part.description,
+        cost_price: part.cost_price,
+        selling_price: part.selling_price,
+        current_stock: part.current_stock,
+        location: {
+          room: part.room_name || 'Unknown',
+          cabinet: part.cabinet_name || 'Unknown',
+          section: part.section_name || 'Unknown',
+        },
+        low_stock: part.current_stock <= part.reorder_threshold,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to process barcode lookup', error: error.message });
+  }
+});
+
 async function startServer() {
   try {
     await initializeSchema();

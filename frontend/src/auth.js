@@ -412,3 +412,127 @@ export function fetchStockLogs(limit = 100) {
 export function fetchStockLogsByPart(partId, limit = 100) {
   return request(`/api/stock/logs?partId=${partId}&limit=${limit}`)
 }
+
+// ============================================================================
+// Dashboard KPIs API Helpers (Phase 3)
+// ============================================================================
+
+export function fetchDashboardKPIs() {
+  return request('/api/dashboard/kpis')
+}
+
+export function fetchEnhancedDashboardKPIs() {
+  return request('/api/dashboard/kpis-enhanced')
+}
+
+// ============================================================================
+// System AI API Helpers (Phase 3)
+// ============================================================================
+
+export function fetchReorderSuggestions() {
+  return request('/api/ai/reorder-suggestions')
+}
+
+export function fetchSalesTrends(days = 30) {
+  return request(`/api/ai/sales-trends?days=${days}`)
+}
+
+export function fetchDemandForecast() {
+  return request('/api/ai/demand-forecast')
+}
+
+// ============================================================================
+// Reports API Helpers (Phase 4)
+// ============================================================================
+
+export function downloadStockReport(format = 'json', sectionId = null) {
+  let url = `/api/reports/stock?format=${format}`
+  if (sectionId) {
+    url += `&sectionId=${sectionId}`
+  }
+  return request(url)
+}
+
+export function downloadSalesReport(format = 'json', startDate = null, endDate = null) {
+  let url = `/api/reports/sales?format=${format}`
+  if (startDate) {
+    url += `&startDate=${startDate}`
+  }
+  if (endDate) {
+    url += `&endDate=${endDate}`
+  }
+  return request(url)
+}
+
+export async function downloadStockReportCSV(sectionId = null) {
+  const token = getToken()
+  if (!token) {
+    const error = new Error('Session expired. Please sign in again.')
+    error.status = 401
+    throw error
+  }
+
+  let url = `${API_BASE_URL}/api/reports/stock?format=csv`
+  if (sectionId) {
+    url += `&sectionId=${sectionId}`
+  }
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+
+  if (!response.ok) {
+    const error = new Error('Failed to download stock report')
+    error.status = response.status
+    throw error
+  }
+
+  return response.blob()
+}
+
+export async function downloadSalesReportCSV(startDate = null, endDate = null) {
+  const token = getToken()
+  if (!token) {
+    const error = new Error('Session expired. Please sign in again.')
+    error.status = 401
+    throw error
+  }
+
+  let url = `${API_BASE_URL}/api/reports/sales?format=csv`
+  if (startDate) {
+    url += `&startDate=${startDate}`
+  }
+  if (endDate) {
+    url += `&endDate=${endDate}`
+  }
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+
+  if (!response.ok) {
+    const error = new Error('Failed to download sales report')
+    error.status = response.status
+    throw error
+  }
+
+  return response.blob()
+}
+
+// ============================================================================
+// Barcode/QR Scanning API Helpers (Phase 3)
+// ============================================================================
+
+export function lookupByBarcode(barcode) {
+  return request('/api/barcode/lookup', {
+    method: 'POST',
+    body: JSON.stringify({ barcode }),
+  })
+}
+
+export function lookupBySKU(sku) {
+  return request('/api/barcode/lookup', {
+    method: 'POST',
+    body: JSON.stringify({ sku }),
+  })
+}

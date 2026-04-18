@@ -14,10 +14,10 @@ async function seedRoles(client) {
     INSERT INTO roles (name, permissions)
     VALUES
       ('SUPER_ADMIN', '["*"]'::jsonb),
-      ('MANAGER', '["inventory:*","billing:*","customers:*","dashboard:read"]'::jsonb),
-      ('BILLING_STAFF', '["billing:*","customers:read","inventory:read","dashboard:read"]'::jsonb),
+      ('MANAGER', '["inventory:*","billing:*","customers:*","employees:*","dashboard:read","logs:read"]'::jsonb),
+      ('BILLING_STAFF', '["billing:*","customers:read","inventory:read","dashboard:read","logs:read"]'::jsonb),
       ('WAREHOUSE_STAFF', '["inventory:*","dashboard:read"]'::jsonb),
-      ('VIEW_ONLY', '["dashboard:read","inventory:read"]'::jsonb)
+      ('VIEW_ONLY', '["dashboard:read","inventory:read","logs:read"]'::jsonb)
     ON CONFLICT (name) DO NOTHING;
   `);
 }
