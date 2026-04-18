@@ -40,6 +40,22 @@ async function initializeSchema() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS user_settings (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        display_name VARCHAR(120) NOT NULL,
+        station_id VARCHAR(120) NOT NULL UNIQUE,
+        font_size INTEGER NOT NULL DEFAULT 16,
+        is_high_contrast BOOLEAN NOT NULL DEFAULT FALSE,
+        is_dark BOOLEAN NOT NULL DEFAULT FALSE,
+        auto_tax_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        pdf_signature_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (font_size BETWEEN 12 AND 24)
+      );
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS rooms (
         id SERIAL PRIMARY KEY,
         name VARCHAR(120) NOT NULL UNIQUE,
@@ -299,6 +315,12 @@ async function initializeSchema() {
         ('WAREHOUSE_STAFF', '["inventory:*","dashboard:read"]'::jsonb),
         ('VIEW_ONLY', '["dashboard:read","inventory:read"]'::jsonb)
       ON CONFLICT (name) DO NOTHING;
+    `);
+
+    await client.query(`
+      UPDATE users
+      SET role_id = (SELECT id FROM roles WHERE name = 'MANAGER')
+      WHERE role_id IS NULL;
     `);
 
     await client.query('COMMIT');

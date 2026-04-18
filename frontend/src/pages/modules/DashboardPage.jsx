@@ -13,7 +13,7 @@ function DashboardPage() {
   const load = async () => {
     setLoading(true)
     setError('')
-
+    
     try {
       const data = await fetchDashboardKpis()
       setKpis(data.kpis)

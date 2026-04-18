@@ -1,6 +1,13 @@
 import { enqueueOfflineRequest } from './offlineQueue'
 
 const TOKEN_KEY = 'auth_token'
+const PUBLIC_API_PATHS = new Set([
+  '/api/auth/login',
+  '/api/auth/register',
+  '/api/auth/password-reset/request',
+  '/api/auth/password-reset/confirm',
+  '/api/health',
+])
 
 export function saveToken(token) {
   localStorage.setItem(TOKEN_KEY, token)
@@ -34,6 +41,14 @@ async function request(path, options = {}) {
   const method = String(options.method || 'GET').toUpperCase()
   const isMutation = !['GET', 'HEAD'].includes(method)
   const token = getToken()
+
+  if (!token && !PUBLIC_API_PATHS.has(path)) {
+    const error = new Error('Session expired. Please sign in again.')
+    error.status = 401
+    error.code = 'AUTH_REQUIRED'
+    throw error
+  }
+
   const headers = {
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -93,6 +108,10 @@ async function request(path, options = {}) {
   }
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearToken()
+    }
+
     const error = new Error(payload?.message || 'Request failed')
     error.status = response.status
     error.code = payload?.code
@@ -122,6 +141,12 @@ export function login(payload) {
 
 export function getProfile() {
   return request('/api/auth/me')
+}
+
+export function logout() {
+  return request('/api/auth/logout', {
+    method: 'POST',
+  })
 }
 
 export function fetchDashboardKpis() {
@@ -244,4 +269,47 @@ export function createStockTransfer(payload) {
 
 export function fetchLocationTree() {
   return request('/api/inventory/locations/tree')
+}
+
+export function queryVoiceAgent(payload) {
+  return request('/api/ai/voice/query', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function getSettings() {
+  return request('/api/settings')
+}
+
+export function updateSettings(payload) {
+  return request('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function downloadInvoicePdf(id) {
+  const token = getToken()
+  if (!token) {
+    const error = new Error('Session expired. Please sign in again.')
+    error.status = 401
+    throw error
+  }
+
+  const response = await fetch(`/api/billing/bills/${id}/invoice`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      clearToken()
+    }
+    const bodyText = await response.text()
+    throw new Error(bodyText || 'Unable to download invoice')
+  }
+
+  return response.blob()
 }

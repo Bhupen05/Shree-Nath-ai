@@ -61,7 +61,19 @@ async function requireAuth(req, res, next) {
 
   try {
     const decoded = jwt.verify(token, jwtSecret);
-    req.user = decoded;
+    const user = await getUserWithRole(decoded.userId);
+
+    if (!user) {
+      return res.status(401).json({ message: 'Invalid authentication context' });
+    }
+
+    req.user = {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      permissions: user.permissions || [],
+    };
+
     next();
   } catch (_error) {
     return res.status(401).json({ message: 'Invalid or expired token' });
@@ -157,6 +169,43 @@ async function getUserByEmailForAuth(email) {
       LIMIT 1
     `,
     [email]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function ensureUserSettings(userId, client = pool) {
+  await client.query(
+    `
+      INSERT INTO user_settings (user_id, display_name, station_id)
+      SELECT
+        u.id,
+        u.name,
+        CONCAT('STATION_', LPAD(u.id::TEXT, 2, '0'), '_IND_BENGALURU')
+      FROM users u
+      WHERE u.id = $1
+      ON CONFLICT (user_id) DO NOTHING
+    `,
+    [userId]
+  );
+
+  const result = await client.query(
+    `
+      SELECT
+        user_id,
+        display_name,
+        station_id,
+        font_size,
+        is_high_contrast,
+        is_dark,
+        auto_tax_enabled,
+        pdf_signature_enabled,
+        updated_at
+      FROM user_settings
+      WHERE user_id = $1
+      LIMIT 1
+    `,
+    [userId]
   );
 
   return result.rows[0] || null;
@@ -742,7 +791,7 @@ app.post('/api/auth/register', async (req, res) => {
           $1,
           $2,
           $3,
-          (SELECT id FROM roles WHERE name = 'VIEW_ONLY')
+          (SELECT id FROM roles WHERE name = 'MANAGER')
         )
         RETURNING id, name, email, created_at
       `,
@@ -881,6 +930,105 @@ app.post('/api/auth/logout', requireAuth, async (req, res) => {
   });
 
   return res.json({ message: 'Logout successful' });
+});
+
+app.get('/api/settings', requireAuth, async (req, res) => {
+  try {
+    const user = await getUserWithRole(req.user.userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const settings = await ensureUserSettings(req.user.userId);
+    return res.json({
+      message: 'Settings fetched successfully',
+      profile: normalizeUserForResponse(user),
+      settings,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch settings', error: error.message });
+  }
+});
+
+app.put('/api/settings', requireAuth, async (req, res) => {
+  const {
+    displayName,
+    fontSize,
+    isHighContrast,
+    isDark,
+    autoTaxEnabled,
+    pdfSignatureEnabled,
+  } = req.body || {};
+
+  const parsedFontSize = fontSize === undefined ? null : toInteger(fontSize);
+  if (parsedFontSize !== null && (parsedFontSize < 12 || parsedFontSize > 24)) {
+    return res.status(400).json({ message: 'fontSize must be between 12 and 24' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    await ensureUserSettings(req.user.userId, client);
+
+    const result = await client.query(
+      `
+        UPDATE user_settings
+        SET
+          display_name = COALESCE($1, display_name),
+          font_size = COALESCE($2, font_size),
+          is_high_contrast = COALESCE($3, is_high_contrast),
+          is_dark = COALESCE($4, is_dark),
+          auto_tax_enabled = COALESCE($5, auto_tax_enabled),
+          pdf_signature_enabled = COALESCE($6, pdf_signature_enabled),
+          updated_at = NOW()
+        WHERE user_id = $7
+        RETURNING
+          user_id,
+          display_name,
+          station_id,
+          font_size,
+          is_high_contrast,
+          is_dark,
+          auto_tax_enabled,
+          pdf_signature_enabled,
+          updated_at
+      `,
+      [
+        displayName ? String(displayName).trim() : null,
+        parsedFontSize,
+        isHighContrast === undefined ? null : toBoolean(isHighContrast),
+        isDark === undefined ? null : toBoolean(isDark),
+        autoTaxEnabled === undefined ? null : toBoolean(autoTaxEnabled, true),
+        pdfSignatureEnabled === undefined ? null : toBoolean(pdfSignatureEnabled, false),
+        req.user.userId,
+      ]
+    );
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'SETTINGS_UPDATED',
+      entityType: 'user_settings',
+      entityId: req.user.userId,
+      newValue: {
+        displayName: displayName || undefined,
+        fontSize: parsedFontSize || undefined,
+        isHighContrast,
+        isDark,
+        autoTaxEnabled,
+        pdfSignatureEnabled,
+      },
+      ipAddress: req.ip,
+    });
+
+    await client.query('COMMIT');
+    return res.json({ message: 'Settings updated successfully', settings: result.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ message: 'Unable to update settings', error: error.message });
+  } finally {
+    client.release();
+  }
 });
 
 app.post('/api/auth/password-reset/request', async (req, res) => {
