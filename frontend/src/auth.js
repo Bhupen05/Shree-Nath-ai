@@ -1,6 +1,8 @@
 import { enqueueOfflineRequest } from './offlineQueue'
 
 const TOKEN_KEY = 'auth_token'
+export const API_BASE_URL = ''
+
 const PUBLIC_API_PATHS = new Set([
   '/api/auth/login',
   '/api/auth/register',
@@ -312,4 +314,101 @@ export async function downloadInvoicePdf(id) {
   }
 
   return response.blob()
+}
+
+// ============================================================================
+// Employee Management API Helpers
+// ============================================================================
+
+export function fetchEmployees() {
+  return request('/api/employees')
+}
+
+export function getEmployee(id) {
+  return request(`/api/employees/${id}`)
+}
+
+export function createEmployee(payload) {
+  return request('/api/employees', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateEmployee(id, payload) {
+  return request(`/api/employees/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function assignEmployeeRole(employeeId, roleId) {
+  return request(`/api/employees/${employeeId}/roles`, {
+    method: 'POST',
+    body: JSON.stringify({ roleId }),
+  })
+}
+
+export function removeEmployeeRole(employeeId, roleId) {
+  return request(`/api/employees/${employeeId}/roles/${roleId}`, {
+    method: 'DELETE',
+  })
+}
+
+// ============================================================================
+// Activity & Audit Logging API Helpers
+// ============================================================================
+
+export function fetchActivityLogs(limit = 50, offset = 0) {
+  return request(`/api/activity-logs?limit=${limit}&offset=${offset}`)
+}
+
+export function fetchActivityLogsByEmployee(employeeId, limit = 50, offset = 0) {
+  return request(`/api/activity-logs?employeeId=${employeeId}&limit=${limit}&offset=${offset}`)
+}
+
+// ============================================================================
+// Demand Logging API Helpers
+// ============================================================================
+
+export function fetchDemandLogs(limit = 50, offset = 0) {
+  return request(`/api/demand-logs?limit=${limit}&offset=${offset}`)
+}
+
+export function fetchDemandLogsByStatus(fulfilled, limit = 50, offset = 0) {
+  return request(`/api/demand-logs?fulfilled=${fulfilled}&limit=${limit}&offset=${offset}`)
+}
+
+export function createDemandLog(payload) {
+  return request('/api/demand-logs', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+// ============================================================================
+// Stock Management API Helpers
+// ============================================================================
+
+export function createStockEntry(payload) {
+  return request('/api/stock/entries', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function fetchStockEntries(limit = 100) {
+  return request(`/api/stock/entries?limit=${limit}`)
+}
+
+export function fetchStockEntriesByPart(partId, limit = 100) {
+  return request(`/api/stock/entries?partId=${partId}&limit=${limit}`)
+}
+
+export function fetchStockLogs(limit = 100) {
+  return request(`/api/stock/logs?limit=${limit}`)
+}
+
+export function fetchStockLogsByPart(partId, limit = 100) {
+  return request(`/api/stock/logs?partId=${partId}&limit=${limit}`)
 }

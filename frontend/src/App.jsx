@@ -13,6 +13,9 @@ import {
   Type,
   UserCircle,
   Users,
+  Activity,
+  ListChecks,
+  UserPlus,
 } from 'lucide-react'
 import { motion as Motion } from 'motion/react'
 import { clearToken, getProfile, getSettings, getToken, login, logout, saveToken, updateSettings } from './auth'
@@ -22,6 +25,9 @@ import Customers from './components/Customers'
 import Dashboard from './components/Dashboard'
 import Inventory from './components/Inventory'
 import Settings from './components/Settings'
+import EmployeePage from './pages/modules/EmployeePage'
+import ActivityLogsPage from './pages/modules/ActivityLogsPage'
+import DemandLogsPage from './pages/modules/DemandLogsPage'
 
 function App() {
   const [authReady, setAuthReady] = useState(false)
@@ -157,6 +163,12 @@ function App() {
         return <Billing autoTaxEnabled={autoTaxEnabled} />
       case 'customers':
         return <Customers />
+      case 'employees':
+        return <EmployeePage onBack={() => setActiveTab('dashboard')} isLoading={false} />
+      case 'activity':
+        return <ActivityLogsPage onBack={() => setActiveTab('dashboard')} />
+      case 'demand':
+        return <DemandLogsPage onBack={() => setActiveTab('dashboard')} />
       case 'ai':
         return <AIAgent />
       case 'settings':
@@ -288,6 +300,11 @@ function App() {
           <SidebarItem icon={<Package size={20} />} label="Inventory" active={activeTab === 'inventory'} onClick={() => setActiveTab('inventory')} />
           <SidebarItem icon={<ReceiptIndianRupee size={20} />} label="Billing" active={activeTab === 'billing'} onClick={() => setActiveTab('billing')} />
           <SidebarItem icon={<Users size={20} />} label="Customers" active={activeTab === 'customers'} onClick={() => setActiveTab('customers')} />
+          <div className="my-2 border-t border-outline-variant/10" />
+          <SidebarItem icon={<UserPlus size={20} />} label="Employees" active={activeTab === 'employees'} onClick={() => setActiveTab('employees')} />
+          <SidebarItem icon={<Activity size={20} />} label="Activity" active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} />
+          <SidebarItem icon={<ListChecks size={20} />} label="Demand" active={activeTab === 'demand'} onClick={() => setActiveTab('demand')} />
+          <div className="my-2 border-t border-outline-variant/10" />
           <SidebarItem icon={<Bot size={20} />} label="AI Agent" active={activeTab === 'ai'} onClick={() => setActiveTab('ai')} />
           <SidebarItem icon={<SettingsIcon size={20} />} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
         </nav>

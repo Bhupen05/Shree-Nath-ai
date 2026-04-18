@@ -3145,6 +3145,492 @@ app.post('/api/ai/voice/query', requireAuth, requirePermission('inventory:read')
   }
 });
 
+// ============================================================================
+// EMPLOYEE MANAGEMENT ENDPOINTS
+// ============================================================================
+
+app.post('/api/employees', requireAuth, requirePermission('employees:write'), async (req, res) => {
+  const { fullName, phone, email } = req.body || {};
+
+  if (!fullName || !email) {
+    return res.status(400).json({ message: 'fullName and email are required' });
+  }
+
+  try {
+    // Generate emp_code: EMP-YYYYMMDD-XXXXX
+    const empCode = `EMP-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+
+    const result = await pool.query(
+      `
+        INSERT INTO employees (emp_code, full_name, phone, email, is_active)
+        VALUES ($1, $2, $3, $4, true)
+        RETURNING id, emp_code, full_name, phone, email, is_active, created_at
+      `,
+      [empCode, String(fullName).trim(), phone ? String(phone).trim() : null, String(email).trim().toLowerCase()]
+    );
+
+    const employee = result.rows[0];
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'EMPLOYEE_CREATED',
+      entityType: 'employee',
+      entityId: employee.id,
+      newValue: employee,
+      ipAddress: req.ip,
+    });
+
+    return res.status(201).json({
+      message: 'Employee created successfully',
+      employee,
+    });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'Employee email already exists' });
+    }
+    return res.status(500).json({ message: 'Unable to create employee', error: error.message });
+  }
+});
+
+app.get('/api/employees', requireAuth, requirePermission('employees:read'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT 
+          e.id, e.emp_code, e.full_name, e.phone, e.email, e.is_active, e.created_at, e.updated_at,
+          COALESCE(json_agg(json_build_object('roleId', r.id, 'roleName', r.name)) FILTER (WHERE r.id IS NOT NULL), '[]'::json) as roles
+        FROM employees e
+        LEFT JOIN employee_roles er ON e.id = er.employee_id
+        LEFT JOIN roles r ON er.role_id = r.id
+        GROUP BY e.id
+        ORDER BY e.created_at DESC
+      `
+    );
+
+    return res.json({
+      message: 'Employees fetched successfully',
+      employees: result.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch employees', error: error.message });
+  }
+});
+
+app.get('/api/employees/:id', requireAuth, requirePermission('employees:read'), async (req, res) => {
+  const empId = toInteger(req.params.id);
+  if (!empId) {
+    return res.status(400).json({ message: 'Invalid employee id' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT 
+          e.id, e.emp_code, e.full_name, e.phone, e.email, e.is_active, e.created_at, e.updated_at,
+          COALESCE(json_agg(json_build_object('roleId', r.id, 'roleName', r.name, 'permissions', r.permissions)) FILTER (WHERE r.id IS NOT NULL), '[]'::json) as roles
+        FROM employees e
+        LEFT JOIN employee_roles er ON e.id = er.employee_id
+        LEFT JOIN roles r ON er.role_id = r.id
+        WHERE e.id = $1
+        GROUP BY e.id
+      `,
+      [empId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    return res.json({
+      message: 'Employee fetched successfully',
+      employee: result.rows[0],
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch employee', error: error.message });
+  }
+});
+
+app.put('/api/employees/:id', requireAuth, requirePermission('employees:write'), async (req, res) => {
+  const empId = toInteger(req.params.id);
+  if (!empId) {
+    return res.status(400).json({ message: 'Invalid employee id' });
+  }
+
+  const { fullName, phone, email, isActive } = req.body || {};
+
+  try {
+    const result = await pool.query(
+      `
+        UPDATE employees
+        SET
+          full_name = COALESCE($1, full_name),
+          phone = COALESCE($2, phone),
+          email = COALESCE($3, email),
+          is_active = COALESCE($4, is_active),
+          updated_at = NOW()
+        WHERE id = $5
+        RETURNING id, emp_code, full_name, phone, email, is_active, created_at, updated_at
+      `,
+      [
+        fullName ? String(fullName).trim() : null,
+        phone ? String(phone).trim() : null,
+        email ? String(email).trim().toLowerCase() : null,
+        isActive !== undefined ? Boolean(isActive) : null,
+        empId,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    const employee = result.rows[0];
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'EMPLOYEE_UPDATED',
+      entityType: 'employee',
+      entityId: empId,
+      newValue: employee,
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      message: 'Employee updated successfully',
+      employee,
+    });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'Email already in use' });
+    }
+    return res.status(500).json({ message: 'Unable to update employee', error: error.message });
+  }
+});
+
+app.post('/api/employees/:id/roles', requireAuth, requirePermission('employees:write'), async (req, res) => {
+  const empId = toInteger(req.params.id);
+  const { roleId } = req.body || {};
+  const parsedRoleId = toInteger(roleId);
+
+  if (!empId || !parsedRoleId) {
+    return res.status(400).json({ message: 'Invalid employee id or role id' });
+  }
+
+  try {
+    // Check if employee exists
+    const empCheck = await pool.query('SELECT id FROM employees WHERE id = $1', [empId]);
+    if (empCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    // Check if role exists
+    const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [parsedRoleId]);
+    if (roleCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Role not found' });
+    }
+
+    // Insert role assignment
+    await pool.query(
+      `
+        INSERT INTO employee_roles (employee_id, role_id)
+        VALUES ($1, $2)
+        ON CONFLICT (employee_id, role_id) DO NOTHING
+      `,
+      [empId, parsedRoleId]
+    );
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'EMPLOYEE_ROLE_ASSIGNED',
+      entityType: 'employee_role',
+      entityId: empId,
+      newValue: { employeeId: empId, roleId: parsedRoleId },
+      ipAddress: req.ip,
+    });
+
+    return res.status(201).json({ message: 'Role assigned successfully' });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to assign role', error: error.message });
+  }
+});
+
+// ============================================================================
+// STOCK MANAGEMENT ENDPOINTS (ADVANCED)
+// ============================================================================
+
+app.post('/api/stock/entries', requireAuth, requirePermission('inventory:write'), async (req, res) => {
+  const { partId, sectionId, supplierId, batchNumber, quantity, costPrice, receivedDate, expiryDate, billDocUrl, notes } = req.body || {};
+
+  const parsedPartId = toInteger(partId);
+  const parsedSectionId = toInteger(sectionId);
+  const parsedSupplierId = toInteger(supplierId);
+  const parsedQuantity = toInteger(quantity);
+  const parsedCostPrice = toMoney(costPrice, 2);
+
+  if (!parsedPartId || !parsedSectionId || !parsedQuantity || !parsedCostPrice) {
+    return res.status(400).json({ message: 'partId, sectionId, quantity, and costPrice are required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO stock_entries (part_id, section_id, supplier_id, batch_number, quantity, cost_price, received_date, expiry_date, added_by, bill_doc_url, notes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING id, part_id, section_id, supplier_id, batch_number, quantity, cost_price, received_date, expiry_date, created_at
+      `,
+      [
+        parsedPartId,
+        parsedSectionId,
+        parsedSupplierId || null,
+        batchNumber ? String(batchNumber).trim() : null,
+        parsedQuantity,
+        parsedCostPrice,
+        receivedDate || null,
+        expiryDate || null,
+        req.user.userId,
+        billDocUrl ? String(billDocUrl).trim() : null,
+        notes ? String(notes).trim() : null,
+      ]
+    );
+
+    const entry = result.rows[0];
+
+    // Create immutable stock log entry
+    await pool.query(
+      `
+        INSERT INTO stock_logs (stock_entry_id, part_id, action, quantity_change, balance_after, reference_type, reference_id, performed_by, notes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        entry.id,
+        parsedPartId,
+        'STOCK_ENTRY_CREATED',
+        parsedQuantity,
+        parsedQuantity, // Initial balance is the quantity added
+        'stock_entry',
+        entry.id,
+        req.user.userId,
+        `Stock entry created: Batch ${batchNumber || 'N/A'}, Qty ${parsedQuantity}`,
+      ]
+    );
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'STOCK_ENTRY_CREATED',
+      entityType: 'stock_entry',
+      entityId: entry.id,
+      newValue: entry,
+      ipAddress: req.ip,
+    });
+
+    return res.status(201).json({
+      message: 'Stock entry created successfully',
+      entry,
+    });
+  } catch (error) {
+    if (error.code === '23503') {
+      return res.status(400).json({ message: 'Invalid part, section, or supplier reference' });
+    }
+    return res.status(500).json({ message: 'Unable to create stock entry', error: error.message });
+  }
+});
+
+app.get('/api/stock/entries', requireAuth, requirePermission('inventory:read'), async (req, res) => {
+  const { partId, sectionId, supplierId, limit = 100 } = req.query || {};
+  const parsedLimit = Math.min(toInteger(limit) || 100, 1000);
+
+  let query = `
+    SELECT id, part_id, section_id, supplier_id, batch_number, quantity, cost_price, received_date, expiry_date, created_at
+    FROM stock_entries
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (partId) {
+    params.push(toInteger(partId));
+    query += ` AND part_id = $${params.length}`;
+  }
+  if (sectionId) {
+    params.push(toInteger(sectionId));
+    query += ` AND section_id = $${params.length}`;
+  }
+  if (supplierId) {
+    params.push(toInteger(supplierId));
+    query += ` AND supplier_id = $${params.length}`;
+  }
+
+  query += ` ORDER BY created_at DESC LIMIT $${params.length + 1}`;
+  params.push(parsedLimit);
+
+  try {
+    const result = await pool.query(query, params);
+    return res.json({
+      message: 'Stock entries fetched successfully',
+      entries: result.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch stock entries', error: error.message });
+  }
+});
+
+app.get('/api/stock/logs', requireAuth, requirePermission('inventory:read'), async (req, res) => {
+  const { partId, limit = 100 } = req.query || {};
+  const parsedLimit = Math.min(toInteger(limit) || 100, 1000);
+
+  let query = `
+    SELECT id, stock_entry_id, part_id, action, quantity_change, balance_after, reference_type, reference_id, performed_by, notes, created_at
+    FROM stock_logs
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (partId) {
+    params.push(toInteger(partId));
+    query += ` AND part_id = $${params.length}`;
+  }
+
+  query += ` ORDER BY created_at DESC LIMIT $${params.length + 1}`;
+  params.push(parsedLimit);
+
+  try {
+    const result = await pool.query(query, params);
+    return res.json({
+      message: 'Stock logs fetched successfully',
+      logs: result.rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch stock logs', error: error.message });
+  }
+});
+
+// ============================================================================
+// ACTIVITY & DEMAND LOGGING ENDPOINTS
+// ============================================================================
+
+app.get('/api/activity-logs', requireAuth, requirePermission('audit:read'), async (req, res) => {
+  const { employeeId, entityType, limit = 100, offset = 0 } = req.query || {};
+  const parsedLimit = Math.min(toInteger(limit) || 100, 1000);
+  const parsedOffset = toInteger(offset) || 0;
+
+  let query = `
+    SELECT id, employee_id, action, entity_type, entity_id, ip_address, metadata, created_at
+    FROM activity_logs
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (employeeId) {
+    params.push(toInteger(employeeId));
+    query += ` AND employee_id = $${params.length}`;
+  }
+  if (entityType) {
+    params.push(String(entityType).trim());
+    query += ` AND entity_type = $${params.length}`;
+  }
+
+  query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+  params.push(parsedLimit, parsedOffset);
+
+  try {
+    const result = await pool.query(query, params);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM activity_logs WHERE 1=1${employeeId ? ` AND employee_id = ${toInteger(employeeId)}` : ''}${entityType ? ` AND entity_type = '${String(entityType).trim()}'` : ''}`
+    );
+
+    return res.json({
+      message: 'Activity logs fetched successfully',
+      logs: result.rows,
+      total: toInteger(countResult.rows[0].total),
+      limit: parsedLimit,
+      offset: parsedOffset,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch activity logs', error: error.message });
+  }
+});
+
+app.get('/api/demand-logs', requireAuth, requirePermission('ai_agent:read'), async (req, res) => {
+  const { fulfilled, limit = 100, offset = 0 } = req.query || {};
+  const parsedLimit = Math.min(toInteger(limit) || 100, 1000);
+  const parsedOffset = toInteger(offset) || 0;
+
+  let query = `
+    SELECT id, source, query_text, product_id, vehicle_make, vehicle_model, quantity_req, fulfilled, caller_phone, created_at
+    FROM demand_logs
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (fulfilled !== undefined) {
+    params.push(fulfilled === 'true' || fulfilled === true);
+    query += ` AND fulfilled = $${params.length}`;
+  }
+
+  query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+  params.push(parsedLimit, parsedOffset);
+
+  try {
+    const result = await pool.query(query, params);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM demand_logs${fulfilled !== undefined ? ` WHERE fulfilled = ${fulfilled === 'true' || fulfilled === true}` : ''}`
+    );
+
+    return res.json({
+      message: 'Demand logs fetched successfully',
+      logs: result.rows,
+      total: toInteger(countResult.rows[0].total),
+      limit: parsedLimit,
+      offset: parsedOffset,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to fetch demand logs', error: error.message });
+  }
+});
+
+app.post('/api/demand-logs', requireAuth, async (req, res) => {
+  const { source, queryText, productId, vehicleMake, vehicleModel, quantityReq, callerPhone, fulfilled } = req.body || {};
+
+  if (!source || !queryText) {
+    return res.status(400).json({ message: 'source and queryText are required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO demand_logs (source, query_text, product_id, vehicle_make, vehicle_model, quantity_req, fulfilled, caller_phone)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, source, query_text, product_id, vehicle_make, vehicle_model, quantity_req, fulfilled, caller_phone, created_at
+      `,
+      [
+        String(source).trim(),
+        String(queryText).trim(),
+        toInteger(productId) || null,
+        vehicleMake ? String(vehicleMake).trim() : null,
+        vehicleModel ? String(vehicleModel).trim() : null,
+        toInteger(quantityReq) || 0,
+        fulfilled === true || fulfilled === 'true',
+        callerPhone ? String(callerPhone).trim() : null,
+      ]
+    );
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'DEMAND_LOG_CREATED',
+      entityType: 'demand',
+      entityId: result.rows[0].id,
+      newValue: result.rows[0],
+      ipAddress: req.ip,
+    });
+
+    return res.status(201).json({
+      message: 'Demand logged successfully',
+      log: result.rows[0],
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to log demand', error: error.message });
+  }
+});
+
 app.get('/api/health', async (_req, res) => {
   try {
     const db = await checkDatabaseConnection();

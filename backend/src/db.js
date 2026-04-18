@@ -56,6 +56,132 @@ async function initializeSchema() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS employees (
+        id SERIAL PRIMARY KEY,
+        emp_code VARCHAR(20) NOT NULL UNIQUE,
+        full_name VARCHAR(120) NOT NULL,
+        phone VARCHAR(15) UNIQUE,
+        email VARCHAR(120) UNIQUE,
+        password_hash VARCHAR(255) NOT NULL,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS employee_roles (
+        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+        PRIMARY KEY (employee_id, role_id)
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS suppliers (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(150) NOT NULL,
+        contact_name VARCHAR(100),
+        phone VARCHAR(15),
+        email VARCHAR(120),
+        address TEXT,
+        gstin VARCHAR(20),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_entries (
+        id SERIAL PRIMARY KEY,
+        part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+        section_id INTEGER NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+        supplier_id INTEGER REFERENCES suppliers(id),
+        bill_reference VARCHAR(100),
+        batch_number VARCHAR(80),
+        quantity INTEGER NOT NULL CHECK (quantity >= 0),
+        cost_price NUMERIC(12,2),
+        received_date DATE NOT NULL,
+        expiry_date DATE,
+        added_by INTEGER REFERENCES users(id),
+        bill_doc_url TEXT,
+        notes TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_logs (
+        id SERIAL PRIMARY KEY,
+        stock_entry_id INTEGER REFERENCES stock_entries(id),
+        part_id INTEGER NOT NULL REFERENCES parts(id),
+        action VARCHAR(20) NOT NULL CHECK (action IN ('IN', 'OUT', 'ADJUST', 'TRANSFER')),
+        quantity_change INTEGER NOT NULL,
+        balance_after INTEGER,
+        reference_type VARCHAR(30),
+        reference_id INTEGER,
+        performed_by INTEGER REFERENCES users(id),
+        notes TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS activity_logs (
+        id SERIAL PRIMARY KEY,
+        employee_id INTEGER REFERENCES employees(id),
+        action VARCHAR(80) NOT NULL,
+        entity_type VARCHAR(50),
+        entity_id INTEGER,
+        ip_address INET,
+        user_agent TEXT,
+        metadata JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS demand_logs (
+        id SERIAL PRIMARY KEY,
+        source VARCHAR(20) NOT NULL CHECK (source IN ('VOICE_AI', 'MANUAL', 'WEB')),
+        query_text TEXT,
+        product_id INTEGER REFERENCES parts(id),
+        vehicle_make VARCHAR(60),
+        vehicle_model VARCHAR(60),
+        quantity_req INTEGER,
+        fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
+        caller_phone VARCHAR(15),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS payment_reminders (
+        id SERIAL PRIMARY KEY,
+        bill_id INTEGER NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
+        channel VARCHAR(20) NOT NULL CHECK (channel IN ('SMS', 'WHATSAPP', 'EMAIL')),
+        scheduled_at TIMESTAMPTZ NOT NULL,
+        sent_at TIMESTAMPTZ,
+        status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'SENT', 'FAILED')),
+        message_body TEXT,
+        response_log JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS product_vehicles (
+        id SERIAL PRIMARY KEY,
+        part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+        make VARCHAR(60) NOT NULL,
+        model VARCHAR(60) NOT NULL,
+        year_from INTEGER,
+        year_to INTEGER,
+        notes TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS rooms (
         id SERIAL PRIMARY KEY,
         name VARCHAR(120) NOT NULL UNIQUE,
@@ -156,6 +282,7 @@ async function initializeSchema() {
         phone VARCHAR(30),
         email VARCHAR(255),
         address TEXT,
+        gstin VARCHAR(20),
         credit_limit NUMERIC(12,2) NOT NULL DEFAULT 0,
         outstanding_balance NUMERIC(12,2) NOT NULL DEFAULT 0,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -194,9 +321,10 @@ async function initializeSchema() {
         due_date DATE,
         created_by INTEGER REFERENCES users(id),
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        CHECK (bill_type IN ('PURCHASE', 'SALE')),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (bill_type IN ('PURCHASE', 'SALES', 'RETURN', 'CREDIT_NOTE')),
         CHECK (party_type IN ('CUSTOMER', 'SUPPLIER')),
-        CHECK (status IN ('DRAFT', 'CONFIRMED', 'PARTIALLY_PAID', 'PAID', 'CANCELLED'))
+        CHECK (status IN ('DRAFT', 'CONFIRMED', 'PARTIALLY_PAID', 'PAID', 'PARTIAL', 'OVERDUE', 'CANCELLED'))
       );
     `);
 
@@ -299,6 +427,26 @@ async function initializeSchema() {
     await client.query('CREATE INDEX IF NOT EXISTS idx_vehicle_lookup ON vehicle_compatibility(make, model, year_from, year_to);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_stock_ledger_part ON stock_ledger(part_id);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_stock_ledger_created_at ON stock_ledger(created_at DESC);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_stock_entries_part ON stock_entries(part_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_stock_entries_supplier ON stock_entries(supplier_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_stock_logs_part ON stock_logs(part_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_stock_logs_created_at ON stock_logs(created_at DESC);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_activity_logs_employee ON activity_logs(employee_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs(created_at DESC);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_demand_logs_created_at ON demand_logs(created_at DESC);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_payment_reminders_bill ON payment_reminders(bill_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_payment_reminders_scheduled ON payment_reminders(scheduled_at);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_product_vehicles_part ON product_vehicles(part_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_stock_entries_part ON stock_entries(part_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_stock_entries_supplier ON stock_entries(supplier_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_stock_logs_part ON stock_logs(part_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_stock_logs_created_at ON stock_logs(created_at DESC);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_activity_logs_employee ON activity_logs(employee_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs(created_at DESC);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_demand_logs_created_at ON demand_logs(created_at DESC);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_payment_reminders_bill ON payment_reminders(bill_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_payment_reminders_scheduled ON payment_reminders(scheduled_at);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_product_vehicles_part ON product_vehicles(part_id);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_bills_bill_date ON bills(bill_date DESC);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_bills_status ON bills(status);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_payments_bill_id ON payments(bill_id);');
