@@ -220,6 +220,21 @@ export function registerServiceWorker() {
     return Promise.resolve();
   }
 
+  // Service workers in Vite dev mode can cache/fallback incorrectly while code changes,
+  // which often surfaces as module MIME errors. Keep SW for production builds only.
+  if (import.meta.env.DEV) {
+    return navigator.serviceWorker.getRegistrations().then(async (registrations) => {
+      for (const registration of registrations) {
+        await registration.unregister();
+      }
+      console.log('[PWA] Skipped Service Worker registration in development mode');
+      return null;
+    }).catch((err) => {
+      console.warn('[PWA] Unable to clean up dev service workers:', err);
+      return null;
+    });
+  }
+
   return new Promise((resolve) => {
     window.addEventListener('load', async () => {
       try {

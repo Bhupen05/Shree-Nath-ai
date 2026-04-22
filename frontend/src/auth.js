@@ -159,8 +159,28 @@ export function fetchInventoryParts() {
   return request('/api/inventory/parts')
 }
 
-export function fetchBills() {
-  return request('/api/billing/bills')
+export function fetchBills(filters = {}) {
+  const params = new URLSearchParams()
+
+  if (filters.partyType) {
+    params.set('partyType', filters.partyType)
+  }
+  if (filters.partyId !== undefined && filters.partyId !== null && filters.partyId !== '') {
+    params.set('partyId', String(filters.partyId))
+  }
+  if (filters.status) {
+    params.set('status', filters.status)
+  }
+  if (filters.billType) {
+    params.set('billType', filters.billType)
+  }
+  if (filters.limit) {
+    params.set('limit', String(filters.limit))
+  }
+
+  const query = params.toString()
+  const path = query ? `/api/billing/bills?${query}` : '/api/billing/bills'
+  return request(path)
 }
 
 export function fetchCustomers() {

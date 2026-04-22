@@ -1,17 +1,36 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion as Motion } from 'motion/react'
 import { FileText, Plus, Printer, ReceiptIndianRupee, ScanBarcode, Trash2, Users, XCircle } from 'lucide-react'
-import { addBillPayment, cancelBill, confirmBill, createBill, downloadInvoicePdf, fetchBills, fetchCustomers, fetchInventoryParts } from '../auth'
+import {
+  addBillPayment,
+  cancelBill,
+  confirmBill,
+  createBill,
+  downloadInvoicePdf,
+  fetchBills,
+  fetchCustomers,
+  fetchInventoryParts,
+  fetchSuppliers,
+} from '../auth'
 
 export default function Billing({ autoTaxEnabled = true }) {
+  const todayIso = new Date().toISOString().slice(0, 10)
   const [lineItems, setLineItems] = useState([])
   const [customers, setCustomers] = useState([])
+  const [suppliers, setSuppliers] = useState([])
   const [parts, setParts] = useState([])
   const [bills, setBills] = useState([])
+  const [billType, setBillType] = useState('SALE')
   const [selectedCustomerId, setSelectedCustomerId] = useState('')
+  const [selectedSupplierId, setSelectedSupplierId] = useState('')
   const [selectedPartId, setSelectedPartId] = useState('')
+  const [skuInput, setSkuInput] = useState('')
   const [selectedQty, setSelectedQty] = useState('1')
+  const [billDate, setBillDate] = useState(todayIso)
+  const [paymentTerm, setPaymentTerm] = useState('FULL')
+  const [dueDate, setDueDate] = useState('')
   const [selectedBillId, setSelectedBillId] = useState('')
+  const [selectedPaymentBillId, setSelectedPaymentBillId] = useState('')
   const [paymentAmount, setPaymentAmount] = useState('')
   const [paymentMode, setPaymentMode] = useState('CASH')
   const [statusMessage, setStatusMessage] = useState('')
@@ -21,13 +40,64 @@ export default function Billing({ autoTaxEnabled = true }) {
     return new Map(parts.map((part) => [String(part.sku).toUpperCase(), part]))
   }, [parts])
 
+  const billsById = useMemo(() => {
+    return new Map(bills.map((bill) => [String(bill.id), bill]))
+  }, [bills])
+
+  const paymentEligibleBills = useMemo(() => {
+    return bills.filter((bill) => ['CONFIRMED', 'PARTIALLY_PAID'].includes(bill.status))
+  }, [bills])
+
+  const billSummary = useMemo(() => {
+    const total = bills.length
+    const completed = bills.filter((bill) => bill.status === 'PAID').length
+    const pending = bills.filter((bill) => ['DRAFT', 'CONFIRMED', 'PARTIALLY_PAID'].includes(bill.status)).length
+    return { total, completed, pending }
+  }, [bills])
+
+  const isSaleBill = billType === 'SALE'
+  const selectedPartyId = isSaleBill ? selectedCustomerId : selectedSupplierId
+  const partyLabel = isSaleBill ? 'Customer' : 'Supplier'
+
+  const ensureCreditDueDate = () => {
+    if (dueDate) {
+      return
+    }
+
+    const next30 = new Date()
+    next30.setDate(next30.getDate() + 30)
+    setDueDate(next30.toISOString().slice(0, 10))
+  }
+
+  const handleBillTypeChange = (event) => {
+    const nextBillType = event.target.value
+    setBillType(nextBillType)
+
+    if (nextBillType !== 'SALE') {
+      setPaymentTerm('FULL')
+      setDueDate('')
+    }
+  }
+
+  const handlePaymentTermChange = (nextTerm) => {
+    setPaymentTerm(nextTerm)
+
+    if (nextTerm === 'FULL') {
+      setDueDate('')
+      return
+    }
+
+    ensureCreditDueDate()
+  }
+
   useEffect(() => {
     let cancelled = false
 
     const run = async () => {
       try {
-        const [customerData, partData, billData] = await Promise.all([
+        const [customerData, supplierData, partData, billData] = await Promise.all([
           fetchCustomers(),
+          fetchSuppliers(),
           fetchInventoryParts(),
           fetchBills(),
         ])
@@ -42,8 +112,28 @@ export default function Billing({ autoTaxEnabled = true }) {
           setSelectedCustomerId((prev) => prev || String(customerItems[0].id))
         }
 
+        const supplierItems = supplierData.items || []
+        setSuppliers(supplierItems)
+        if (supplierItems.length > 0) {
+          setSelectedSupplierId((prev) => prev || String(supplierItems[0].id))
+        }
+
         setParts(partData.items || [])
         setBills(billData.items || [])
+        if ((partData.items || []).length > 0) {
+          setSelectedPartId((prev) => prev || String(partData.items[0].id))
+        }
+        if ((billData.items || []).length > 0) {
+          setSelectedBillId((prev) => prev || String(billData.items[0].id))
+          setSelectedPaymentBillId((prev) => {
+            if (prev) {
+              return prev
+            }
+
+            const firstEligible = (billData.items || []).find((bill) => ['CONFIRMED', 'PARTIALLY_PAID'].includes(bill.status))
+            return firstEligible ? String(firstEligible.id) : ''
+          })
+        }
         setError('')
       } catch (loadError) {
         if (!cancelled) {
@@ -62,8 +152,9 @@ export default function Billing({ autoTaxEnabled = true }) {
   const loadBillingData = async () => {
     setError('')
     try {
-      const [customerData, partData, billData] = await Promise.all([
+      const [customerData, supplierData, partData, billData] = await Promise.all([
         fetchCustomers(),
+        fetchSuppliers(),
         fetchInventoryParts(),
         fetchBills(),
       ])
@@ -74,6 +165,12 @@ export default function Billing({ autoTaxEnabled = true }) {
         setSelectedCustomerId(String(customerItems[0].id))
       }
 
+      const supplierItems = supplierData.items || []
+      setSuppliers(supplierItems)
+      if (!selectedSupplierId && supplierItems.length > 0) {
+        setSelectedSupplierId(String(supplierItems[0].id))
+      }
+
       setParts(partData.items || [])
       setBills(billData.items || [])
       if ((partData.items || []).length > 0) {
@@ -81,6 +178,14 @@ export default function Billing({ autoTaxEnabled = true }) {
       }
       if ((billData.items || []).length > 0) {
         setSelectedBillId((prev) => prev || String(billData.items[0].id))
+        setSelectedPaymentBillId((prev) => {
+          if (prev) {
+            return prev
+          }
+
+          const firstEligible = (billData.items || []).find((bill) => ['CONFIRMED', 'PARTIALLY_PAID'].includes(bill.status))
+          return firstEligible ? String(firstEligible.id) : ''
+        })
       }
       setError('')
     } catch (loadError) {
@@ -89,7 +194,19 @@ export default function Billing({ autoTaxEnabled = true }) {
   }
 
   const updateQty = (id, qty) => {
-    setLineItems((prev) => prev.map((item) => (item.id === id ? { ...item, qty: Math.max(0, qty) } : item)))
+    setLineItems((prev) => prev.map((item) => {
+      if (item.id !== id) {
+        return item
+      }
+
+      const nextQty = Math.max(1, Number(qty || 1))
+      if (isSaleBill && nextQty > item.stock) {
+        setError(`Insufficient stock for ${item.description}. Available: ${item.stock}`)
+        return item
+      }
+
+      return { ...item, qty: nextQty }
+    }))
   }
 
   const removeItem = (id) => {
@@ -100,6 +217,41 @@ export default function Billing({ autoTaxEnabled = true }) {
   const totalTax = autoTaxEnabled ? lineItems.reduce((acc, item) => acc + item.qty * item.unitPrice * item.taxRate, 0) : 0
   const grandTotal = subtotal + totalTax
 
+  const addOrMergeLineItem = (matchedPart, quantity) => {
+    setLineItems((prev) => {
+      const existingItem = prev.find((item) => Number(item.partId) === Number(matchedPart.id))
+
+      if (existingItem) {
+        const nextQty = existingItem.qty + quantity
+        if (isSaleBill && nextQty > existingItem.stock) {
+          setError(`Insufficient stock for ${existingItem.description}. Available: ${existingItem.stock}`)
+          return prev
+        }
+
+        return prev.map((item) => (item.id === existingItem.id ? { ...item, qty: nextQty } : item))
+      }
+
+      if (isSaleBill && quantity > Number(matchedPart.current_stock || 0)) {
+        setError(`Insufficient stock for ${matchedPart.name}. Available: ${matchedPart.current_stock || 0}`)
+        return prev
+      }
+
+      return [
+        ...prev,
+        {
+          id: `${matchedPart.id}-${Date.now()}`,
+          partId: matchedPart.id,
+          description: matchedPart.name,
+          sku: matchedPart.sku,
+          stock: Number(matchedPart.current_stock || 0),
+          qty: quantity,
+          unitPrice: Number(matchedPart.selling_price || 0),
+          taxRate: 0.18,
+        },
+      ]
+    })
+  }
+
   const addLineItemFromSelection = () => {
     const matchedPart = parts.find((part) => String(part.id) === String(selectedPartId))
     const quantity = Math.max(1, Number(selectedQty || 1))
@@ -109,18 +261,26 @@ export default function Billing({ autoTaxEnabled = true }) {
       return
     }
 
-    setLineItems((prev) => [
-      ...prev,
-      {
-        id: `${matchedPart.id}-${Date.now()}`,
-        description: matchedPart.name,
-        sku: matchedPart.sku,
-        stock: Number(matchedPart.current_stock || 0),
-        qty: quantity,
-        unitPrice: Number(matchedPart.selling_price || 0),
-        taxRate: 0.18,
-      },
-    ])
+    addOrMergeLineItem(matchedPart, quantity)
+    setSelectedQty('1')
+    setSkuInput('')
+    setError('')
+  }
+
+  const addLineItemFromSku = () => {
+    const normalizedSku = String(skuInput || '').trim().toUpperCase()
+    const matchedPart = partBySku.get(normalizedSku)
+    const quantity = Math.max(1, Number(selectedQty || 1))
+
+    if (!normalizedSku || !matchedPart) {
+      setError('Invalid SKU. Scan or enter a valid part SKU.')
+      return
+    }
+
+    setSelectedPartId(String(matchedPart.id))
+    addOrMergeLineItem(matchedPart, quantity)
+    setSelectedQty('1')
+    setSkuInput('')
     setError('')
   }
 
@@ -128,8 +288,13 @@ export default function Billing({ autoTaxEnabled = true }) {
     setStatusMessage('')
     setError('')
 
-    if (!selectedCustomerId) {
-      setError('Select a customer before creating bill draft')
+    if (!selectedPartyId) {
+      setError(`Select a ${partyLabel.toLowerCase()} before creating bill draft`)
+      return
+    }
+
+    if (isSaleBill && ['CREDIT', 'PARTIAL'].includes(paymentTerm) && !dueDate) {
+      setError('Please set due date for credit/partial sales bill')
       return
     }
 
@@ -156,9 +321,11 @@ export default function Billing({ autoTaxEnabled = true }) {
 
     try {
       const payload = {
-        billType: 'SALE',
-        partyType: 'CUSTOMER',
-        partyId: Number(selectedCustomerId),
+        billType,
+        partyType: isSaleBill ? 'CUSTOMER' : 'SUPPLIER',
+        partyId: Number(selectedPartyId),
+        billDate: billDate || undefined,
+        dueDate: dueDate || undefined,
         items: normalizedItems,
         tax: totalTax,
         discount: 0,
@@ -166,6 +333,10 @@ export default function Billing({ autoTaxEnabled = true }) {
 
       const data = await createBill(payload)
       setStatusMessage(`Draft created: ${data.bill?.bill_number || 'Unknown bill number'}`)
+      setLineItems([])
+      if (data.bill?.id) {
+        setSelectedBillId(String(data.bill.id))
+      }
       await loadBillingData()
     } catch (createError) {
       setError(createError.message || 'Unable to create bill draft')
@@ -173,6 +344,8 @@ export default function Billing({ autoTaxEnabled = true }) {
   }
 
   const handleConfirmBill = async () => {
+    setStatusMessage('')
+    setError('')
     if (!selectedBillId) {
       setError('Select a bill to confirm')
       return
@@ -188,8 +361,16 @@ export default function Billing({ autoTaxEnabled = true }) {
   }
 
   const handleCancelBill = async () => {
+    setStatusMessage('')
+    setError('')
     if (!selectedBillId) {
       setError('Select a bill to cancel')
+      return
+    }
+
+    const selectedBill = billsById.get(String(selectedBillId))
+    if (selectedBill?.status === 'PARTIALLY_PAID') {
+      setError('Cannot cancel partially paid bill. Refund/reconcile first.')
       return
     }
 
@@ -203,13 +384,26 @@ export default function Billing({ autoTaxEnabled = true }) {
   }
 
   const handleRecordPayment = async () => {
-    if (!selectedBillId) {
+    setStatusMessage('')
+    setError('')
+    if (!selectedPaymentBillId) {
       setError('Select a bill to add payment')
       return
     }
 
+    if (Number(paymentAmount) <= 0) {
+      setError('Enter a valid payment amount')
+      return
+    }
+
+    const selectedBill = billsById.get(String(selectedPaymentBillId))
+    if (!selectedBill || !['CONFIRMED', 'PARTIALLY_PAID'].includes(selectedBill.status)) {
+      setError('Payments are only allowed for CONFIRMED or PARTIALLY_PAID bills')
+      return
+    }
+
     try {
-      await addBillPayment(Number(selectedBillId), {
+      await addBillPayment(Number(selectedPaymentBillId), {
         amount: Number(paymentAmount),
         paymentMode,
       })
@@ -222,6 +416,8 @@ export default function Billing({ autoTaxEnabled = true }) {
   }
 
   const handleDownloadInvoice = async () => {
+    setStatusMessage('')
+    setError('')
     if (!selectedBillId) {
       setError('Select a bill to download invoice')
       return
@@ -239,15 +435,15 @@ export default function Billing({ autoTaxEnabled = true }) {
   }
 
   return (
-    <div className="grid grid-cols-12 gap-8">
+    <div className="grid grid-cols-12 gap-6 lg:gap-8">
       <div className="col-span-12 space-y-8 lg:col-span-8">
         <Motion.section initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="rounded-xl border border-outline-variant/5 bg-surface-container-lowest p-6 shadow-sm">
-          <div className="mb-10 flex flex-col gap-2">
+          <div className="mb-8 flex flex-col gap-2">
             <div className="mb-4 inline-block w-fit rounded-full bg-secondary px-3 py-1 text-[10px] font-black uppercase tracking-widest text-secondary-container">
               Billing Mode Active
             </div>
-            <h2 className="text-[64px] leading-[0.95] font-bold tracking-[-0.04em] text-on-surface md:text-[112px]">Precision in every quote.</h2>
-            <p className="mt-4 max-w-xl text-lg text-on-surface-variant">A minimalist approach to industrial billing, designed to reduce cognitive load and enhance your warehouse throughput.</p>
+            <h2 className="text-3xl leading-tight font-bold tracking-tight text-on-surface md:text-5xl">Precision in every quote.</h2>
+            <p className="mt-2 max-w-xl text-sm text-on-surface-variant md:text-base">A clean billing workspace designed to reduce cognitive load and keep high-volume billing fast and accurate.</p>
           </div>
 
           <div className="mb-6 flex flex-col items-start justify-between gap-4 border-b border-outline-variant/5 pb-4 sm:flex-row sm:items-center">
@@ -257,19 +453,40 @@ export default function Billing({ autoTaxEnabled = true }) {
 
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
             <div className="space-y-3">
-              <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Customer Selection</label>
+              <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Bill Type</label>
+              <div className="group relative">
+                <div className="flex items-center rounded-lg border-b-2 border-transparent bg-surface-container-highest px-4 py-3 transition-all focus-within:border-primary">
+                  <select
+                    value={billType}
+                    onChange={handleBillTypeChange}
+                    className="w-full border-none bg-transparent text-sm font-medium outline-none"
+                  >
+                    <option value="SALE">Sales Bill (Stock OUT)</option>
+                    <option value="PURCHASE">Purchase Bill (Stock IN)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div className="space-y-3">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">{partyLabel} Selection</label>
               <div className="group relative">
                 <div className="flex items-center rounded-lg border-b-2 border-transparent bg-surface-container-highest px-4 py-3 transition-all focus-within:border-primary">
                   <Users size={18} className="mr-3 text-primary" />
                   <select
-                    value={selectedCustomerId}
-                    onChange={(event) => setSelectedCustomerId(event.target.value)}
+                    value={selectedPartyId}
+                    onChange={(event) => {
+                      if (isSaleBill) {
+                        setSelectedCustomerId(event.target.value)
+                      } else {
+                        setSelectedSupplierId(event.target.value)
+                      }
+                    }}
                     className="w-full border-none bg-transparent text-sm font-medium outline-none"
                   >
-                    <option value="">Select customer</option>
-                    {customers.map((customer) => (
-                      <option key={customer.id} value={customer.id}>
-                        {customer.name}
+                    <option value="">Select {partyLabel.toLowerCase()}</option>
+                    {(isSaleBill ? customers : suppliers).map((party) => (
+                      <option key={party.id} value={party.id}>
+                        {party.name}
                       </option>
                     ))}
                   </select>
@@ -279,10 +496,31 @@ export default function Billing({ autoTaxEnabled = true }) {
             </div>
             <div className="space-y-3">
               <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Billing Address</label>
-              <div className="flex min-h-[46px] items-center rounded-lg bg-surface-container-low px-4 py-3">
+              <div className="flex min-h-11.5 items-center rounded-lg bg-surface-container-low px-4 py-3">
                 <p className="text-xs italic opacity-60">Search for a customer to auto-populate shipping and tax details.</p>
               </div>
             </div>
+            <div className="space-y-3">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Bill Date</label>
+              <input
+                type="date"
+                value={billDate}
+                onChange={(event) => setBillDate(event.target.value)}
+                className="w-full rounded-lg border-none bg-surface-container-high py-3 px-3 text-sm font-medium outline-none transition-all focus:ring-1 focus:ring-primary"
+              />
+            </div>
+            {isSaleBill && ['CREDIT', 'PARTIAL'].includes(paymentTerm) ? (
+              <div className="space-y-3">
+                <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Due Date (Credit/Partial)</label>
+                <input
+                  type="date"
+                  value={dueDate}
+                  min={billDate}
+                  onChange={(event) => setDueDate(event.target.value)}
+                  className="w-full rounded-lg border-none bg-surface-container-high py-3 px-3 text-sm font-medium outline-none transition-all focus:ring-1 focus:ring-primary"
+                />
+              </div>
+            ) : null}
           </div>
         </Motion.section>
 
@@ -302,9 +540,28 @@ export default function Billing({ autoTaxEnabled = true }) {
                 ))}
               </select>
             </div>
+            <div className="w-full sm:w-48">
+              <input
+                type="text"
+                placeholder="Scan or type SKU"
+                value={skuInput}
+                onChange={(event) => setSkuInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    addLineItemFromSku()
+                  }
+                }}
+                className="w-full rounded-lg border-none bg-surface-container-high py-3.5 px-3 text-sm font-medium uppercase outline-none transition-all focus:ring-1 focus:ring-primary"
+              />
+            </div>
             <div className="w-full sm:w-32">
               <input type="number" min="1" value={selectedQty} onChange={(event) => setSelectedQty(event.target.value)} className="w-full rounded-lg border-none bg-surface-container-high py-3.5 px-3 text-sm font-medium outline-none transition-all focus:ring-1 focus:ring-primary" />
             </div>
+            <button onClick={addLineItemFromSku} className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary bg-transparent px-4 py-3.5 text-sm font-bold text-primary transition-all hover:bg-primary hover:text-white sm:w-auto">
+              <ScanBarcode size={18} />
+              Add by SKU
+            </button>
             <button onClick={addLineItemFromSelection} className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-6 py-3.5 text-sm font-bold text-white shadow-md shadow-primary/20 transition-all hover:opacity-90 sm:w-auto">
               <Plus size={18} />
               Add Item
@@ -312,7 +569,7 @@ export default function Billing({ autoTaxEnabled = true }) {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="min-w-[600px] w-full text-left">
+            <table className="w-full min-w-150 text-left">
               <thead>
                 <tr className="border-b border-outline-variant/10 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/50">
                   <th className="px-4 pb-4 font-bold">Part Description</th>
@@ -371,16 +628,36 @@ export default function Billing({ autoTaxEnabled = true }) {
         </Motion.section>
       </div>
 
-      <div className="col-span-12 space-y-6 lg:col-span-4">
+      <div className="col-span-12 space-y-6 lg:col-span-4 lg:sticky lg:top-4 lg:self-start">
         <Motion.section initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="rounded-xl border border-primary/5 bg-surface-container-highest p-6">
           <h3 className="mb-6 flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-primary">
             <ReceiptIndianRupee size={16} />
             Payment Scheduling
           </h3>
           <div className="space-y-3">
-            <PaymentOption id="full" title="Full Payment" description="Settled immediately via Cash/Wire" defaultChecked />
-            <PaymentOption id="credit" title="On Credit (Net-30)" description="Subject to customer credit limit" />
-            <PaymentOption id="partial" title="Partial / Installment" description="Advance + Scheduled payouts" />
+            <PaymentOption
+              id="full"
+              title="Full Payment"
+              description="Settled immediately via Cash/Wire"
+              checked={paymentTerm === 'FULL'}
+              onChange={() => handlePaymentTermChange('FULL')}
+            />
+            <PaymentOption
+              id="credit"
+              title="On Credit (Net-30)"
+              description="Subject to customer credit limit"
+              checked={paymentTerm === 'CREDIT'}
+              onChange={() => handlePaymentTermChange('CREDIT')}
+              disabled={!isSaleBill}
+            />
+            <PaymentOption
+              id="partial"
+              title="Partial / Installment"
+              description="Advance + Scheduled payouts"
+              checked={paymentTerm === 'PARTIAL'}
+              onChange={() => handlePaymentTermChange('PARTIAL')}
+              disabled={!isSaleBill}
+            />
           </div>
         </Motion.section>
 
@@ -435,16 +712,23 @@ export default function Billing({ autoTaxEnabled = true }) {
           </button>
         </div>
 
-        <div className="rounded-xl border border-outline-variant/10 bg-white p-4">
-          <p className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">Latest Bills</p>
-          <div className="mt-3 space-y-2">
+        <div className="rounded-xl border border-outline-variant/10 bg-surface-container-lowest p-4">
+          <p className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">Bill Actions</p>
+          <div className="mt-2 grid grid-cols-3 gap-2 text-center text-[10px] font-bold uppercase tracking-wide">
+            <div className="rounded-lg bg-surface-container-low px-2 py-2">Total: {billSummary.total}</div>
+            <div className="rounded-lg bg-green-50 px-2 py-2 text-green-700">Complete: {billSummary.completed}</div>
+            <div className="rounded-lg bg-amber-50 px-2 py-2 text-amber-700">Pending: {billSummary.pending}</div>
+          </div>
+          <div className="mt-3 space-y-3">
             <select value={selectedBillId} onChange={(event) => setSelectedBillId(event.target.value)} className="w-full rounded-lg border border-outline-variant/20 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary">
-              <option value="">Select bill</option>
+              <option value="">Select bill for actions</option>
               {bills.map((bill) => (
                 <option key={bill.id} value={bill.id}>{bill.bill_number} - {bill.status}</option>
               ))}
             </select>
             <button onClick={handleConfirmBill} className="w-full rounded-lg bg-primary px-3 py-2 text-xs font-bold text-white">Confirm Selected Bill</button>
+
+            <p className="pt-1 text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">Payment Entry</p>
             <div className="grid grid-cols-2 gap-2">
               <input type="number" placeholder="Payment amount" value={paymentAmount} onChange={(event) => setPaymentAmount(event.target.value)} className="rounded-lg border border-outline-variant/20 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary" />
               <select value={paymentMode} onChange={(event) => setPaymentMode(event.target.value)} className="rounded-lg border border-outline-variant/20 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary">
@@ -454,6 +738,12 @@ export default function Billing({ autoTaxEnabled = true }) {
                 <option value="CHEQUE">CHEQUE</option>
               </select>
             </div>
+            <select value={selectedPaymentBillId} onChange={(event) => setSelectedPaymentBillId(event.target.value)} className="w-full rounded-lg border border-outline-variant/20 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary">
+              <option value="">Select bill for payment</option>
+              {paymentEligibleBills.map((bill) => (
+                <option key={bill.id} value={bill.id}>{bill.bill_number} - Due Rs {Number(bill.amount_due || 0).toLocaleString()}</option>
+              ))}
+            </select>
             <button onClick={handleRecordPayment} className="w-full rounded-lg border border-outline-variant/20 bg-surface-container-low px-3 py-2 text-xs font-bold text-on-surface">Record Payment</button>
           </div>
           <div className="mt-3 space-y-2">
@@ -471,10 +761,18 @@ export default function Billing({ autoTaxEnabled = true }) {
   )
 }
 
-function PaymentOption({ id, title, description, defaultChecked = false }) {
+function PaymentOption({ id, title, description, checked = false, onChange, disabled = false }) {
   return (
-    <label htmlFor={id} className="group flex cursor-pointer items-center gap-4 rounded-xl border border-outline-variant/10 bg-surface-container-lowest p-4 transition-all hover:ring-2 hover:ring-primary/20">
-      <input type="radio" id={id} name="payment" defaultChecked={defaultChecked} className="h-5 w-5 border-outline-variant/50 text-primary focus:ring-primary" />
+    <label htmlFor={id} className={`group flex items-center gap-4 rounded-xl border border-outline-variant/10 bg-surface-container-lowest p-4 transition-all ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:ring-2 hover:ring-primary/20'}`}>
+      <input
+        type="radio"
+        id={id}
+        name="payment"
+        checked={checked}
+        onChange={onChange}
+        disabled={disabled}
+        className="h-5 w-5 border-outline-variant/50 text-primary focus:ring-primary"
+      />
       <div>
         <p className="text-sm font-bold text-on-surface">{title}</p>
         <p className="text-[10px] font-medium text-on-surface-variant/60">{description}</p>

@@ -1,59 +1,59 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
 
 @theme {
-  --font-sans: "Helvetica Neue", Arial, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  
+  --color-primary: #00346f;
+  --color-primary-container: #004a99;
+  --color-on-primary: #ffffff;
+  
+  --color-secondary: #4e5f7f;
+  --color-secondary-container: #c6d7fd;
+  --color-on-secondary-container: #4d5d7e;
+  
+  --color-tertiary: #5f2200;
+  --color-tertiary-container: #833301;
+  --color-on-tertiary-container: #ffa77e;
+  --color-tertiary-fixed: #ffdbcc;
+  --color-on-tertiary-fixed-variant: #7b2f00;
 
-  --color-primary: #84a98c;
-  --color-primary-container: #52796f;
-  --color-secondary: #a8dadc;
-  --color-secondary-container: #457b9d;
-  --color-surface: #f4f7f6;
-  --color-surface-dim: #e1e5e4;
-  --color-surface-bright: #f4f7f6;
+  --color-surface: #f8f9ff;
   --color-surface-container-lowest: #ffffff;
-  --color-surface-container-low: #ffffff;
-  --color-surface-container: #ffffff;
-  --color-surface-container-high: #fbfbfc;
-  --color-surface-container-highest: #ffffff;
-  --color-on-surface: #2d3436;
-  --color-on-surface-variant: #636e72;
-  --color-outline-variant: #dddddd;
+  --color-surface-container-low: #eef4ff;
+  --color-surface-container: #e5eeff;
+  --color-surface-container-high: #dfe9fa;
+  --color-surface-container-highest: #d9e3f4;
+  
+  --color-on-surface: #121c28;
+  --color-on-surface-variant: #424751;
+  
+  --color-error: #ba1a1a;
+  --color-error-container: #ffdad6;
+  --color-on-error-container: #93000a;
+  
+  --color-outline: #737783;
+  --color-outline-variant: #c2c6d3;
+
+  --shadow-ambient: 0 12px 40px rgba(18, 28, 40, 0.06);
 }
 
 @layer base {
-  * {
-    box-sizing: border-box;
-  }
-
   body {
-    @apply bg-surface text-on-surface antialiased;
-    font-size: var(--app-font-size, 16px);
-    margin: 0;
-    min-width: 320px;
-  }
-
-  .dark {
-    --color-surface: #1e2122;
-    --color-surface-container-lowest: #2d3436;
-    --color-surface-container-low: #2d3436;
-    --color-surface-container: #3b4244;
-    --color-surface-container-high: #444c4e;
-    --color-surface-container-highest: #2d3436;
-    --color-on-surface: #f4f7f6;
-    --color-on-surface-variant: #b2bec3;
-    --color-outline-variant: #444444;
-    --color-primary: #a8dadc;
-    --color-primary-container: #84a98c;
+    @apply bg-surface text-on-surface font-sans antialiased;
   }
 }
 
-:root {
-  --app-font-size: 16px;
+/* Custom scrollbar for a technical feel */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
 
-.high-contrast {
-  --color-primary: #000000;
-  --color-on-surface: #000000;
-  --color-surface: #ffffff;
-  --color-surface-container-highest: #dddddd;
+::-webkit-scrollbar-track {
+  @apply bg-surface-container-low;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-outline-variant rounded-full hover:bg-outline transition-colors;
 }

@@ -5,7 +5,7 @@ import DataTable from '../../components/ui/DataTable';
 import FormField from '../../components/ui/FormField';
 import { fetchActivityLogs } from '../../auth';
 
-export default function ActivityLogsPage({ onBack }) {
+export default function ActivityLogsPage() {
   const [logs, setLogs] = useState([]);
   const [filteredLogs, setFilteredLogs] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -43,13 +43,6 @@ export default function ActivityLogsPage({ onBack }) {
     setFilteredLogs(filtered);
   }, [searchTerm, filterAction, logs]);
 
-  const columns = [
-    { key: 'created_at', label: 'Timestamp', render: (value) => new Date(value).toLocaleString() },
-    { key: 'action', label: 'Action' },
-    { key: 'entity_type', label: 'Entity Type' },
-    { key: 'entity_id', label: 'Entity ID' },
-    { key: 'ip_address', label: 'IP Address' },
-  ];
 
   const getUniqueActions = () => {
     return [...new Set(logs.map((log) => log.action))].sort();

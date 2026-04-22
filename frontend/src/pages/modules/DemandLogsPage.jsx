@@ -5,7 +5,7 @@ import DataTable from '../../components/ui/DataTable';
 import Button from '../../components/ui/Button';
 import { fetchDemandLogs, fetchDemandLogsByStatus } from '../../auth';
 
-export default function DemandLogsPage({ onBack }) {
+export default function DemandLogsPage() {
   const [logs, setLogs] = useState([]);
   const [filteredLogs, setFilteredLogs] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -48,33 +48,6 @@ export default function DemandLogsPage({ onBack }) {
     });
     setFilteredLogs(filtered);
   }, [searchTerm, logs]);
-
-  const columns = [
-    {
-      key: 'created_at',
-      label: 'Time',
-      render: (value) => new Date(value).toLocaleString(),
-    },
-    { key: 'source', label: 'Source' },
-    { key: 'query_text', label: 'Query' },
-    { key: 'vehicle_make', label: 'Vehicle Make' },
-    { key: 'vehicle_model', label: 'Vehicle Model' },
-    { key: 'quantity_req', label: 'Qty Required' },
-    {
-      key: 'fulfilled',
-      label: 'Status',
-      render: (value) =>
-        value ? (
-          <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-100 rounded-full text-xs font-medium">
-            <CheckCircle size={14} /> Fulfilled
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 px-2 py-1 bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-100 rounded-full text-xs font-medium">
-            <Circle size={14} /> Pending
-          </span>
-        ),
-    },
-  ];
 
   return (
     <div className="space-y-6">

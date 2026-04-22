@@ -11,6 +11,39 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (function cleanupLocalServiceWorkers() {
+        var isLocalHost =
+          window.location.hostname === 'localhost' ||
+          window.location.hostname === '127.0.0.1';
+
+        if (!isLocalHost || !('serviceWorker' in navigator)) {
+          return;
+        }
+
+        navigator.serviceWorker.getRegistrations()
+          .then(function (registrations) {
+            if (!registrations.length) {
+              return;
+            }
+
+            return Promise.all(
+              registrations.map(function (registration) {
+                return registration.unregister();
+              })
+            ).then(function () {
+              var key = 'sibms-sw-cleanup-done';
+              if (!sessionStorage.getItem(key)) {
+                sessionStorage.setItem(key, '1');
+                window.location.reload();
+              }
+            });
+          })
+          .catch(function () {
+            // Ignore cleanup failures and continue boot.
+          });
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

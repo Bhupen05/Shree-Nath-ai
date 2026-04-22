@@ -284,8 +284,173 @@ async function writeStockLedgerEntry({
   );
 }
 
+async function allocateSaleStockFIFO({ client, billId, partId, requiredQuantity, performedBy = null }) {
+  let remaining = toInteger(requiredQuantity) || 0;
+  if (remaining <= 0) {
+    return true;
+  }
+
+  const entriesResult = await client.query(
+    `
+      SELECT id, quantity
+      FROM stock_entries
+      WHERE part_id = $1
+        AND quantity > 0
+      ORDER BY COALESCE(received_date, created_at::date) ASC, id ASC
+      FOR UPDATE
+    `,
+    [partId]
+  );
+
+  const totalAvailable = entriesResult.rows.reduce((acc, row) => acc + (toInteger(row.quantity) || 0), 0);
+  if (totalAvailable < remaining) {
+    return false;
+  }
+
+  for (const entry of entriesResult.rows) {
+    if (remaining <= 0) {
+      break;
+    }
+
+    const available = toInteger(entry.quantity) || 0;
+    if (available <= 0) {
+      continue;
+    }
+
+    const consume = Math.min(available, remaining);
+    const updateResult = await client.query(
+      `
+        UPDATE stock_entries
+        SET quantity = quantity - $1,
+            updated_at = NOW()
+        WHERE id = $2
+          AND quantity >= $1
+        RETURNING quantity
+      `,
+      [consume, entry.id]
+    );
+
+    if (updateResult.rowCount === 0) {
+      throw new Error(`Unable to consume stock for part ${partId} from entry ${entry.id}`);
+    }
+
+    const balanceAfter = toInteger(updateResult.rows[0].quantity) || 0;
+    await client.query(
+      `
+        INSERT INTO stock_logs (stock_entry_id, part_id, action, quantity_change, balance_after, reference_type, reference_id, performed_by, notes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        entry.id,
+        partId,
+        'BILL_SALE_OUT',
+        -consume,
+        balanceAfter,
+        'bill',
+        billId,
+        performedBy,
+        `FIFO stock consumed for bill ${billId}`,
+      ]
+    );
+
+    remaining -= consume;
+  }
+
+  if (remaining > 0) {
+    throw new Error(`Insufficient stock entries for part ${partId}`);
+  }
+
+  return true;
+}
+
+async function restoreSaleStockForBill({ client, billId, performedBy = null }) {
+  const consumptionLogs = await client.query(
+    `
+      SELECT id, stock_entry_id, part_id, quantity_change
+      FROM stock_logs
+      WHERE reference_type = 'bill'
+        AND reference_id = $1
+        AND action = 'BILL_SALE_OUT'
+      ORDER BY id DESC
+      FOR UPDATE
+    `,
+    [billId]
+  );
+
+  for (const log of consumptionLogs.rows) {
+    const restoreQty = Math.abs(toInteger(log.quantity_change) || 0);
+    if (restoreQty <= 0) {
+      continue;
+    }
+
+    const updateResult = await client.query(
+      `
+        UPDATE stock_entries
+        SET quantity = quantity + $1,
+            updated_at = NOW()
+        WHERE id = $2
+        RETURNING quantity
+      `,
+      [restoreQty, log.stock_entry_id]
+    );
+
+    if (updateResult.rowCount === 0) {
+      continue;
+    }
+
+    const balanceAfter = toInteger(updateResult.rows[0].quantity) || 0;
+    await client.query(
+      `
+        INSERT INTO stock_logs (stock_entry_id, part_id, action, quantity_change, balance_after, reference_type, reference_id, performed_by, notes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        log.stock_entry_id,
+        log.part_id,
+        'BILL_SALE_REVERT',
+        restoreQty,
+        balanceAfter,
+        'bill',
+        billId,
+        performedBy,
+        `Stock restored due to bill cancellation ${billId}`,
+      ]
+    );
+  }
+}
+
 const NOTIFICATION_CHANNELS = ['SMS', 'WHATSAPP', 'EMAIL', 'INTERNAL'];
 const NOTIFICATION_JOB_STATUSES = ['PENDING', 'SENT', 'FAILED', 'CANCELLED'];
+
+function getReminderStageChannels(stage) {
+  switch (String(stage || '')) {
+    case 'T_MINUS_3':
+      return ['WHATSAPP', 'EMAIL'];
+    case 'DUE_TODAY':
+      return ['SMS', 'WHATSAPP'];
+    case 'OVERDUE_DAY_1':
+      return ['SMS', 'EMAIL'];
+    case 'OVERDUE_DAY_7':
+      return ['WHATSAPP', 'EMAIL'];
+    default:
+      return ['INTERNAL'];
+  }
+}
+
+function getReminderStageLabel(stage) {
+  switch (String(stage || '')) {
+    case 'T_MINUS_3':
+      return 'due in 3 days';
+    case 'DUE_TODAY':
+      return 'due today';
+    case 'OVERDUE_DAY_1':
+      return 'overdue by 1 day';
+    case 'OVERDUE_DAY_7':
+      return 'overdue by 7 days';
+    default:
+      return 'payment reminder';
+  }
+}
 
 function toBoolean(value, fallback = false) {
   if (value === undefined || value === null || value === '') {
@@ -333,7 +498,24 @@ async function generateBillReminderJobs({ client, daysAhead = 2, includeOverdue 
 
   const result = await client.query(
     `
-      WITH due_bills AS (
+            WITH stage_windows AS (
+         SELECT 'T_MINUS_3'::TEXT AS stage,
+           (CURRENT_DATE + INTERVAL '3 day')::DATE AS target_due_date,
+           (CURRENT_DATE + TIME '10:00')::TIMESTAMPTZ AS scheduled_for
+         UNION ALL
+         SELECT 'DUE_TODAY'::TEXT,
+           CURRENT_DATE,
+           (CURRENT_DATE + TIME '09:00')::TIMESTAMPTZ
+         UNION ALL
+         SELECT 'OVERDUE_DAY_1'::TEXT,
+           (CURRENT_DATE - INTERVAL '1 day')::DATE,
+           (CURRENT_DATE + TIME '10:00')::TIMESTAMPTZ
+         UNION ALL
+         SELECT 'OVERDUE_DAY_7'::TEXT,
+           (CURRENT_DATE - INTERVAL '7 day')::DATE,
+           (CURRENT_DATE + TIME '10:00')::TIMESTAMPTZ
+            ),
+            due_bills AS (
         SELECT
           b.id AS bill_id,
           b.party_type,
@@ -341,6 +523,8 @@ async function generateBillReminderJobs({ client, daysAhead = 2, includeOverdue 
           b.bill_number,
           b.due_date,
           b.amount_due,
+          sw.stage,
+          sw.scheduled_for,
           CASE
             WHEN b.party_type = 'CUSTOMER' THEN c.name
             ELSE s.name
@@ -354,14 +538,15 @@ async function generateBillReminderJobs({ client, daysAhead = 2, includeOverdue 
             ELSE s.email
           END AS recipient_email
         FROM bills b
+        JOIN stage_windows sw ON sw.target_due_date = b.due_date
         LEFT JOIN customers c ON b.party_type = 'CUSTOMER' AND c.id = b.party_id
         LEFT JOIN suppliers s ON b.party_type = 'SUPPLIER' AND s.id = b.party_id
         WHERE b.status IN ('CONFIRMED', 'PARTIALLY_PAID')
           AND b.amount_due > 0
           AND b.due_date IS NOT NULL
           AND (
-            b.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + ($1::INTEGER * INTERVAL '1 day')
-            OR ($2::BOOLEAN = TRUE AND b.due_date < CURRENT_DATE)
+            sw.stage IN ('T_MINUS_3', 'DUE_TODAY')
+            OR ($2::BOOLEAN = TRUE AND sw.stage IN ('OVERDUE_DAY_1', 'OVERDUE_DAY_7'))
           )
       )
       INSERT INTO notification_jobs (
@@ -390,12 +575,19 @@ async function generateBillReminderJobs({ client, daysAhead = 2, includeOverdue 
         db.due_date,
         db.amount_due,
         'PENDING',
-        NOW(),
+        db.scheduled_for,
         jsonb_build_object(
           'billNumber', db.bill_number,
           'dueDate', db.due_date,
           'amountDue', db.amount_due,
-          'stage', CASE WHEN db.due_date < CURRENT_DATE THEN 'OVERDUE' ELSE 'UPCOMING' END
+          'stage', db.stage,
+          'stageLabel', CASE db.stage
+            WHEN 'T_MINUS_3' THEN 'Due in 3 days'
+            WHEN 'DUE_TODAY' THEN 'Due today'
+            WHEN 'OVERDUE_DAY_1' THEN 'Overdue by 1 day'
+            WHEN 'OVERDUE_DAY_7' THEN 'Overdue by 7 days'
+            ELSE 'Payment reminder'
+          END
         ),
         $3
       FROM due_bills db
@@ -406,6 +598,7 @@ async function generateBillReminderJobs({ client, daysAhead = 2, includeOverdue 
           AND nj.job_type = 'BILL_DUE_REMINDER'
           AND nj.status IN ('PENDING', 'SENT')
           AND nj.due_date = db.due_date
+          AND COALESCE(nj.payload->>'stage', '') = db.stage
       )
       RETURNING id
     `,
@@ -416,6 +609,111 @@ async function generateBillReminderJobs({ client, daysAhead = 2, includeOverdue 
     createdCount: result.rowCount,
     daysAhead: clampedDaysAhead,
     includeOverdue,
+  };
+}
+
+async function selectNotificationChannels({ client, jobType = 'BILL_DUE_REMINDER' }) {
+  // Get active templates for this job type
+  const result = await client.query(
+    `
+      SELECT DISTINCT channel
+      FROM notification_templates
+      WHERE is_active = TRUE
+        AND channel IN ('SMS', 'WHATSAPP', 'EMAIL', 'INTERNAL')
+      ORDER BY channel
+    `
+  );
+
+  const channels = result.rows.map(row => row.channel);
+  if (channels.length === 0) {
+    channels.push('INTERNAL'); // Fallback to internal if no templates configured
+  }
+
+  return channels;
+}
+
+async function deliverNotification({ channel, recipientName, recipientPhone, recipientEmail, message, subject = null }) {
+  if (process.env.NODE_ENV === 'test') {
+    return { provider: 'test_stub', messageId: `test-${Date.now()}`, status: 'sent' };
+  }
+
+  const trimmedChannel = normalizeNotificationChannel(channel);
+
+  // SMS Delivery (Twilio)
+  if (trimmedChannel === 'SMS' && recipientPhone) {
+    const twilioAccountSid = process.env.TWILIO_ACCOUNT_SID;
+    const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN;
+    const twilioFromNumber = process.env.TWILIO_FROM_NUMBER;
+
+    if (!twilioAccountSid || !twilioAuthToken || !twilioFromNumber) {
+      throw new Error('Twilio credentials not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER)');
+    }
+
+    const twilio = require('twilio')(twilioAccountSid, twilioAuthToken);
+    const response = await twilio.messages.create({
+      body: message,
+      from: twilioFromNumber,
+      to: recipientPhone,
+    });
+
+    return { provider: 'twilio', messageId: response.sid, status: response.status };
+  }
+
+  // WhatsApp Delivery (Twilio)
+  if (trimmedChannel === 'WHATSAPP' && recipientPhone) {
+    const twilioAccountSid = process.env.TWILIO_ACCOUNT_SID;
+    const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN;
+    const twilioWhatsAppNumber = process.env.TWILIO_WHATSAPP_NUMBER;
+
+    if (!twilioAccountSid || !twilioAuthToken || !twilioWhatsAppNumber) {
+      throw new Error('Twilio WhatsApp not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_NUMBER)');
+    }
+
+    const twilio = require('twilio')(twilioAccountSid, twilioAuthToken);
+    const response = await twilio.messages.create({
+      body: message,
+      from: `whatsapp:${twilioWhatsAppNumber}`,
+      to: `whatsapp:${recipientPhone}`,
+    });
+
+    return { provider: 'twilio_whatsapp', messageId: response.sid, status: response.status };
+  }
+
+  // Email Delivery (SendGrid)
+  if (trimmedChannel === 'EMAIL' && recipientEmail) {
+    const sendgridApiKey = process.env.SENDGRID_API_KEY;
+    const sendgridFromEmail = process.env.SENDGRID_FROM_EMAIL || 'noreply@shreenaath.com';
+
+    if (!sendgridApiKey) {
+      throw new Error('SendGrid API key not configured (SENDGRID_API_KEY)');
+    }
+
+    const sgMail = require('@sendgrid/mail');
+    sgMail.setApiKey(sendgridApiKey);
+
+    const emailMsg = {
+      to: recipientEmail,
+      from: sendgridFromEmail,
+      subject: subject || 'Bill Reminder Notification',
+      text: message,
+      html: `<p>${message.replace(/\n/g, '<br>')}</p>`,
+    };
+
+    const response = await sgMail.send(emailMsg);
+    return { provider: 'sendgrid', messageId: response[0].headers['x-message-id'], status: 'accepted' };
+  }
+
+  // Internal Delivery (Fallback/Demo)
+  return {
+    provider: 'internal',
+    messageId: `internal-${Date.now()}`,
+    status: 'logged',
+    logEntry: {
+      recipientName,
+      recipientPhone: recipientPhone ? recipientPhone.slice(-4).padStart(recipientPhone.length, '*') : null,
+      recipientEmail: recipientEmail ? recipientEmail.split('@')[0].slice(0, 2) + '***' : null,
+      message,
+    },
   };
 }
 
@@ -440,36 +738,96 @@ async function dispatchPendingNotificationJobs({ client, limit = 20, actorUserId
 
   for (const job of pendingResult.rows) {
     try {
-      const renderedMessage = `Reminder: Bill ${job.payload?.billNumber || job.bill_id} has due amount ${job.outstanding_amount} and due date ${job.due_date}.`;
-      const deliveryPayload = {
-        recipientName: job.recipient_name,
-        recipientPhone: job.recipient_phone,
-        recipientEmail: job.recipient_email,
-        message: renderedMessage,
-      };
+      const stage = job.payload?.stage;
+      const stageLabel = getReminderStageLabel(stage);
+      const renderedMessage = `Dear ${job.recipient_name},\n\nReminder: Bill #${job.payload?.billNumber || job.bill_id} is ${stageLabel}. Outstanding amount: ₹${job.outstanding_amount}. Due date: ${job.due_date}.\n\nPlease settle the payment at your earliest convenience.\n\nThank you!`;
+      
+      // Select delivery channels based on configured templates
+      const configuredChannels = await selectNotificationChannels({ client, jobType: job.job_type });
+      const preferredChannels = getReminderStageChannels(stage);
+      const channels = configuredChannels.filter((channel) => preferredChannels.includes(channel));
 
-      await client.query(
-        `
-          INSERT INTO notification_delivery_logs (job_id, channel, status, provider_message, payload, provider_response)
-          VALUES ($1, 'INTERNAL', 'SENT', $2, $3, $4)
-        `,
-        [job.id, 'Dispatched via internal simulator', deliveryPayload, { dispatchedBy: actorUserId }]
-      );
+      const finalChannels = channels.length > 0 ? channels : ['INTERNAL'];
+      let channelSuccessCount = 0;
+      let channelFailureCount = 0;
+      let lastChannelError = null;
 
-      await client.query(
-        `
-          UPDATE notification_jobs
-          SET status = 'SENT',
-              sent_at = NOW(),
-              last_error = NULL,
-              attempt_count = attempt_count + 1,
-              updated_at = NOW()
-          WHERE id = $1
-        `,
-        [job.id]
-      );
+      for (const channel of finalChannels) {
+        try {
+          const deliveryResult = await deliverNotification({
+            channel,
+            recipientName: job.recipient_name,
+            recipientPhone: job.recipient_phone,
+            recipientEmail: job.recipient_email,
+            message: renderedMessage,
+            subject: `Bill Reminder - ${job.payload?.billNumber || job.bill_id}`,
+          });
 
-      sentCount += 1;
+          await client.query(
+            `
+              INSERT INTO notification_delivery_logs (job_id, channel, status, provider_message, payload, provider_response)
+              VALUES ($1, $2, $3, $4, $5, $6)
+            `,
+            [
+              job.id,
+              channel,
+              'SENT',
+              `Delivered via ${deliveryResult.provider}`,
+              { recipientName: job.recipient_name },
+              deliveryResult,
+            ]
+          );
+          channelSuccessCount += 1;
+        } catch (channelError) {
+          lastChannelError = channelError.message;
+          await client.query(
+            `
+              INSERT INTO notification_delivery_logs (job_id, channel, status, provider_message, payload, provider_response)
+              VALUES ($1, $2, $3, $4, $5, $6)
+            `,
+            [
+              job.id,
+              channel,
+              'FAILED',
+              channelError.message,
+              { recipientName: job.recipient_name },
+              null,
+            ]
+          );
+          channelFailureCount += 1;
+        }
+      }
+
+      if (channelSuccessCount > 0) {
+        await client.query(
+          `
+            UPDATE notification_jobs
+            SET status = 'SENT',
+                sent_at = NOW(),
+                last_error = NULL,
+                attempt_count = attempt_count + 1,
+                updated_at = NOW()
+            WHERE id = $1
+          `,
+          [job.id]
+        );
+
+        sentCount += 1;
+      } else {
+        await client.query(
+          `
+            UPDATE notification_jobs
+            SET status = 'FAILED',
+                last_error = $2,
+                attempt_count = attempt_count + 1,
+                updated_at = NOW()
+            WHERE id = $1
+          `,
+          [job.id, lastChannelError || `All channels failed (${channelFailureCount})`]
+        );
+
+        failedCount += 1;
+      }
     } catch (error) {
       await client.query(
         `
@@ -505,6 +863,23 @@ async function dispatchPendingNotificationJobs({ client, limit = 20, actorUserId
 let notificationWorkerTimer = null;
 let notificationWorkerActive = false;
 
+async function syncOverdueBillStatuses({ client }) {
+  const result = await client.query(
+    `
+      UPDATE bills
+      SET status = 'OVERDUE',
+          updated_at = NOW()
+      WHERE status IN ('CONFIRMED', 'PARTIALLY_PAID')
+        AND amount_due > 0
+        AND due_date IS NOT NULL
+        AND due_date < CURRENT_DATE
+      RETURNING id
+    `
+  );
+
+  return { overdueUpdatedCount: result.rowCount };
+}
+
 async function runNotificationWorkerTick() {
   if (notificationWorkerActive) {
     return;
@@ -514,6 +889,8 @@ async function runNotificationWorkerTick() {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await syncOverdueBillStatuses({ client });
+    await generateBillReminderJobs({ client, daysAhead: 3, includeOverdue: true, createdBy: null });
     await dispatchPendingNotificationJobs({ client, limit: 25 });
     await client.query('COMMIT');
   } catch (_error) {
@@ -529,7 +906,8 @@ function startNotificationWorker() {
     return;
   }
 
-  const enabled = toBoolean(process.env.NOTIFICATION_WORKER_ENABLED, true);
+  const enabledDefault = process.env.NODE_ENV === 'test' ? false : true;
+  const enabled = toBoolean(process.env.NOTIFICATION_WORKER_ENABLED, enabledDefault);
   if (!enabled) {
     return;
   }
@@ -791,7 +1169,7 @@ app.post('/api/auth/register', async (req, res) => {
           $1,
           $2,
           $3,
-          (SELECT id FROM roles WHERE name = 'MANAGER')
+          (SELECT id FROM roles WHERE name = 'VIEW_ONLY')
         )
         RETURNING id, name, email, created_at
       `,
@@ -1851,15 +2229,58 @@ async function fetchBillWithItems(client, billId) {
   };
 }
 
-app.get('/api/billing/bills', requireAuth, requirePermission('billing:read'), async (_req, res) => {
+app.get('/api/billing/bills', requireAuth, requirePermission('billing:read'), async (req, res) => {
+  const { partyType, partyId, status, billType, limit } = req.query || {};
+  const normalizedPartyType = partyType ? normalizePartyType(partyType) : null;
+  const normalizedBillType = billType ? normalizeBillType(billType) : null;
+  const normalizedStatus = status ? String(status).trim().toUpperCase() : null;
+  const normalizedPartyId = partyId ? toInteger(partyId) : null;
+  const parsedLimit = Math.min(Math.max(toInteger(limit) || 50, 1), 200);
+
+  if (partyType && !['CUSTOMER', 'SUPPLIER'].includes(normalizedPartyType)) {
+    return res.status(400).json({ message: 'partyType must be CUSTOMER or SUPPLIER' });
+  }
+
+  if (billType && !['SALE', 'PURCHASE'].includes(normalizedBillType)) {
+    return res.status(400).json({ message: 'billType must be SALE or PURCHASE' });
+  }
+
+  if (partyId && !normalizedPartyId) {
+    return res.status(400).json({ message: 'partyId must be a valid integer' });
+  }
+
   try {
     const result = await pool.query(
       `
-        SELECT id, bill_number, bill_type, status, total, amount_due, created_at
-        FROM bills
+        SELECT
+          b.id,
+          b.bill_number,
+          b.bill_type,
+          b.status,
+          b.party_type,
+          b.party_id,
+          b.bill_date,
+          b.due_date,
+          b.total,
+          b.amount_paid,
+          b.amount_due,
+          b.created_at,
+          CASE
+            WHEN b.party_type = 'CUSTOMER' THEN c.name
+            WHEN b.party_type = 'SUPPLIER' THEN s.name
+            ELSE NULL
+          END AS party_name
+        FROM bills b
+        LEFT JOIN customers c ON b.party_type = 'CUSTOMER' AND c.id = b.party_id
+        LEFT JOIN suppliers s ON b.party_type = 'SUPPLIER' AND s.id = b.party_id
+        WHERE ($1::TEXT IS NULL OR b.party_type = $1)
+          AND ($2::INTEGER IS NULL OR b.party_id = $2)
+          AND ($3::TEXT IS NULL OR b.status = $3)
+          AND ($4::TEXT IS NULL OR b.bill_type = $4)
         ORDER BY id DESC
-        LIMIT 50
-      `
+        LIMIT $5
+      `,
+      [normalizedPartyType, normalizedPartyId, normalizedStatus, normalizedBillType, parsedLimit]
     );
 
     return res.json({
@@ -2087,10 +2508,20 @@ app.post('/api/billing/bills/:id/confirm', requireAuth, requirePermission('billi
 
     for (const item of itemsResult.rows) {
       if (isSale) {
-        const availableStock = await getPartStock(item.part_id, null, client);
-        if (availableStock < item.quantity) {
-          await client.query('ROLLBACK');
-          return res.status(400).json({ message: `Insufficient stock for part ${item.part_id}` });
+        const consumedFromEntries = await allocateSaleStockFIFO({
+          client,
+          billId: bill.id,
+          partId: item.part_id,
+          requiredQuantity: item.quantity,
+          performedBy: req.user.userId,
+        });
+
+        if (!consumedFromEntries) {
+          const availableStock = await getPartStock(item.part_id, null, client);
+          if (availableStock < item.quantity) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ message: `Insufficient stock for part ${item.part_id}` });
+          }
         }
       }
 
@@ -2130,6 +2561,21 @@ app.post('/api/billing/bills/:id/confirm', requireAuth, requirePermission('billi
       newValue: { billType: bill.bill_type, total: bill.total },
       ipAddress: req.ip,
     });
+
+    // Generate reminder jobs for SALE bills (customer bills) with due dates
+    if (bill.bill_type === 'SALE' && bill.due_date) {
+      try {
+        await generateBillReminderJobs({
+          client,
+          daysAhead: 3,
+          includeOverdue: false,
+          createdBy: req.user.userId,
+        });
+      } catch (reminderError) {
+        // Log but don't block bill confirmation if reminder generation fails
+        console.error('Failed to generate bill reminder jobs:', reminderError.message);
+      }
+    }
 
     await client.query('COMMIT');
     return res.json({ message: 'Bill confirmed successfully' });
@@ -2279,6 +2725,14 @@ app.post('/api/billing/bills/:id/cancel', requireAuth, requirePermission('billin
         `,
         [bill.id]
       );
+
+      if (bill.bill_type === 'SALE') {
+        await restoreSaleStockForBill({
+          client,
+          billId: bill.id,
+          performedBy: req.user.userId,
+        });
+      }
 
       for (const item of itemsResult.rows) {
         const reverseDelta = bill.bill_type === 'SALE' ? item.quantity : -item.quantity;

@@ -62,6 +62,7 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
+  const destination = request.destination;
 
   // Skip non-GET requests and external origins
   if (request.method !== 'GET' || url.origin !== self.location.origin) {
@@ -74,13 +75,17 @@ self.addEventListener('fetch', (event) => {
   }
   // Static Assets: Cache-first with fallback to network
   else if (
-    url.pathname.match(/\.(js|css|svg|png|jpg|jpeg|gif|webp|woff|woff2)$/i) ||
+    destination === 'script' ||
+    destination === 'style' ||
+    destination === 'image' ||
+    destination === 'font' ||
+    url.pathname.match(/\.(js|mjs|cjs|jsx|ts|tsx|css|svg|png|jpg|jpeg|gif|webp|woff|woff2)$/i) ||
     url.pathname === '/manifest.webmanifest'
   ) {
     event.respondWith(handleStaticRequest(request));
   }
-  // HTML Documents: Network-first with fallback to cache
-  else if (request.headers.get('Accept')?.includes('text/html')) {
+  // HTML navigation requests: Network-first with fallback to cache
+  else if (request.mode === 'navigate' || destination === 'document') {
     event.respondWith(handleHTMLRequest(request));
   }
   // Default: Cache-first for everything else
@@ -181,7 +186,15 @@ async function handleDefaultRequest(request) {
     return await fetch(request.clone());
   } catch {
     const cachedResponse = await caches.match(request);
-    return cachedResponse || caches.match('/');
+    if (cachedResponse) {
+      return cachedResponse;
+    }
+
+    return new Response('Resource unavailable while offline', {
+      status: 503,
+      statusText: 'Service Unavailable',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    });
   }
 }
 

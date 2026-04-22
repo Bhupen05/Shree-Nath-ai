@@ -4,7 +4,7 @@ import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
 import DataTable from '../../components/ui/DataTable';
 import FormField from '../../components/ui/FormField';
-import { fetchEmployees, createEmployee, updateEmployee } from '../../auth';
+import { fetchEmployees, createEmployee } from '../../auth';
 
 export default function EmployeePage() {
   const [employees, setEmployees] = useState([]);
@@ -61,44 +61,6 @@ export default function EmployeePage() {
       alert('Failed to create employee');
     }
   };
-
-  const handleDeleteEmployee = async (empId) => {
-    if (!window.confirm('Are you sure? This will deactivate the employee.')) {
-      return;
-    }
-
-    try {
-      await updateEmployee(empId, { isActive: false });
-      await loadEmployees();
-    } catch (error) {
-      console.error('Error deactivating employee:', error);
-      alert('Failed to deactivate employee');
-    }
-  };
-
-  const columns = [
-    { key: 'emp_code', label: 'Employee Code' },
-    { key: 'full_name', label: 'Full Name' },
-    { key: 'email', label: 'Email' },
-    { key: 'phone', label: 'Phone' },
-    {
-      key: 'is_active',
-      label: 'Status',
-      render: (value) => (value ? 'Active' : 'Inactive'),
-    },
-  ];
-
-  const actions = [
-    {
-      label: 'View',
-      onClick: (row) => setSelectedEmployee(row),
-    },
-    {
-      label: 'Delete',
-      onClick: (row) => handleDeleteEmployee(row.id),
-      destructive: true,
-    },
-  ];
 
   if (selectedEmployee) {
     return (

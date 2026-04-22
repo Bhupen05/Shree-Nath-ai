@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   createCustomer,
   createSupplier,
   deleteCustomer,
   deleteSupplier,
+  fetchBills,
   fetchCustomers,
   fetchSuppliers,
   updateCustomer,
@@ -18,9 +19,13 @@ import { useAuth } from '../../context/AuthContext'
 function CustomersPage() {
   const { can } = useAuth()
   const canWrite = can('customers:write')
+  const canReadBilling = can('billing:read')
   const [activeTab, setActiveTab] = useState('customers')
   const [customers, setCustomers] = useState([])
   const [suppliers, setSuppliers] = useState([])
+  const [customerBills, setCustomerBills] = useState([])
+  const [portalCustomerId, setPortalCustomerId] = useState('')
+  const [portalLoading, setPortalLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [actionError, setActionError] = useState('')
@@ -59,6 +64,46 @@ function CustomersPage() {
   useEffect(() => {
     load()
   }, [])
+
+  const loadCustomerBills = useCallback(async (customerId) => {
+    if (!customerId || !canReadBilling) {
+      setCustomerBills([])
+      return
+    }
+
+    setPortalLoading(true)
+    setActionError('')
+    try {
+      const data = await fetchBills({
+        partyType: 'CUSTOMER',
+        partyId: customerId,
+        limit: 100,
+      })
+      setCustomerBills(data.items || [])
+    } catch (loadError) {
+      setActionError(loadError.message || 'Unable to load customer bills')
+    } finally {
+      setPortalLoading(false)
+    }
+  }, [canReadBilling])
+
+  useEffect(() => {
+    if (activeTab !== 'portal' || !canReadBilling) {
+      return
+    }
+
+    const defaultCustomerId = portalCustomerId || (customers[0] ? String(customers[0].id) : '')
+    if (!portalCustomerId && defaultCustomerId) {
+      setPortalCustomerId(defaultCustomerId)
+      loadCustomerBills(defaultCustomerId)
+      return
+    }
+
+    loadCustomerBills(defaultCustomerId)
+  }, [activeTab, portalCustomerId, customers, canReadBilling, loadCustomerBills])
+
+  const completedBills = customerBills.filter((bill) => bill.status === 'PAID').length
+  const pendingBills = customerBills.filter((bill) => ['DRAFT', 'CONFIRMED', 'PARTIALLY_PAID'].includes(bill.status)).length
 
   const resetCustomerForm = () => {
     setCustomerForm({ name: '', phone: '', email: '', address: '', creditLimit: '' })
@@ -222,6 +267,12 @@ function CustomersPage() {
         >
           Suppliers
         </button>
+        <button
+          className={activeTab === 'portal' ? 'segment-btn segment-btn-active' : 'segment-btn'}
+          onClick={() => setActiveTab('portal')}
+        >
+          Customer Bill Portal
+        </button>
       </section>
 
       {activeTab === 'customers' && canWrite && (
@@ -343,9 +394,10 @@ function CustomersPage() {
             ]}
           />
         )
-      ) : suppliers.length === 0 ? (
+      ) : activeTab === 'suppliers' ? (
+        suppliers.length === 0 ? (
         <StatusView mode="empty" title="No suppliers yet" message="Create supplier records to track payables." />
-      ) : (
+        ) : (
         <DataTable
           title="Supplier accounts"
           rows={suppliers}
@@ -370,6 +422,78 @@ function CustomersPage() {
             },
           ]}
         />
+        )
+      ) : !canReadBilling ? (
+        <StatusView mode="empty" title="Billing Access Required" message="Your role cannot read billing records." />
+      ) : (
+        <section className="stack">
+          <section className="inline-form">
+            <h2>Customer Bill Portal</h2>
+            <div className="inline-grid">
+              <label className="form-field" htmlFor="portalCustomerId">
+                <span>Customer</span>
+                <select
+                  id="portalCustomerId"
+                  value={portalCustomerId}
+                  onChange={(event) => setPortalCustomerId(event.target.value)}
+                >
+                  <option value="">Select customer</option>
+                  {customers.map((customer) => (
+                    <option key={customer.id} value={customer.id}>
+                      {customer.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="inline-grid" style={{ marginTop: '0.75rem' }}>
+              <div className="pill">Total Bills: {customerBills.length}</div>
+              <div className="pill">Complete: {completedBills}</div>
+              <div className="pill">Pending: {pendingBills}</div>
+            </div>
+          </section>
+
+          {portalLoading ? (
+            <StatusView mode="loading" title="Loading bills" message="Fetching customer billing history..." />
+          ) : customerBills.length === 0 ? (
+            <StatusView mode="empty" title="No bills found" message="This customer has no billing records yet." />
+          ) : (
+            <DataTable
+              title="Customer bill history"
+              rows={customerBills}
+              searchKeys={['bill_number', 'status', 'bill_type', 'party_name']}
+              columns={[
+                { key: 'bill_number', label: 'Bill No', sortable: true },
+                { key: 'bill_type', label: 'Type', sortable: true },
+                { key: 'status', label: 'Status', sortable: true },
+                {
+                  key: 'bill_date',
+                  label: 'Bill Date',
+                  sortable: true,
+                  render: (row) => (row.bill_date ? new Date(row.bill_date).toLocaleDateString() : '-'),
+                },
+                {
+                  key: 'due_date',
+                  label: 'Due Date',
+                  sortable: true,
+                  render: (row) => (row.due_date ? new Date(row.due_date).toLocaleDateString() : '-'),
+                },
+                {
+                  key: 'total',
+                  label: 'Total',
+                  sortable: true,
+                  render: (row) => `Rs ${Number(row.total || 0).toLocaleString()}`,
+                },
+                {
+                  key: 'amount_due',
+                  label: 'Pending',
+                  sortable: true,
+                  render: (row) => `Rs ${Number(row.amount_due || 0).toLocaleString()}`,
+                },
+              ]}
+            />
+          )}
+        </section>
       )}
     </section>
   )
