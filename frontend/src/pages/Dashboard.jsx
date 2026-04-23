@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import {
 	Download,
 	Droplets,
@@ -7,6 +8,7 @@ import {
 	Plus,
 	Wallet,
 	AlertCircle,
+	Loader,
 } from 'lucide-react'
 import { motion } from 'motion/react'
 import {
@@ -20,72 +22,35 @@ import {
 
 const cn = (...classes) => classes.filter(Boolean).join(' ')
 
-const assets = [
-	{
-		id: 1,
-		name: 'Precision Ball Bearing X-200',
-		category: 'Mechanical / Rotating Parts',
-		sku: 'ARC-BEAR-200',
-		velocity: 85,
-		stock: '1,420 Units',
-		valuation: '$28,400.00',
-		img: 'https://picsum.photos/seed/bearing/100/100',
-	},
-	{
-		id: 2,
-		name: 'Steel Drive Sprocket 48T',
-		category: 'Transmission / Drive Train',
-		sku: 'ARC-SPRKT-48',
-		velocity: 42,
-		stock: '612 Units',
-		valuation: '$12,852.00',
-		img: 'https://picsum.photos/seed/gear/100/100',
-	},
-	{
-		id: 3,
-		name: 'Synthetic Engine Lube 5W-30',
-		category: 'Chemical / Consumables',
-		sku: 'ARC-CHEM-LUB',
-		velocity: 12,
-		stock: '14 Barrels',
-		valuation: '$1,890.00',
-		isCritical: true,
-		icon: Droplets,
-	},
-]
+// API Configuration
+const API_BASE = 'http://localhost:5000/api'
+const getAuthToken = () => localStorage.getItem('auth_token')
 
-const updates = [
-	{
-		time: 'TODAY, 10:45 AM',
-		title: 'Inbound: SKU-92182 (Gears)',
-		sub: 'Warehouse A-42 • 500 Units',
-		active: true,
-		color: 'bg-primary',
-	},
-	{
-		time: 'TODAY, 08:20 AM',
-		title: 'Transfer: SKU-11204 (Rotors)',
-		sub: 'From Main Hub to Retail B',
-		color: 'bg-secondary',
-	},
-	{
-		time: 'YESTERDAY, 04:15 PM',
-		title: 'Inbound: SKU-44291 (Belts)',
-		sub: 'Supplier: Tech-Drive Ltd.',
-		faded: true,
-		color: 'bg-outline-variant',
-	},
-]
+// API Utility Functions
+const apiCall = async (endpoint, options = {}) => {
+	const token = getAuthToken()
+	const response = await fetch(`${API_BASE}${endpoint}`, {
+		...options,
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`,
+			...options.headers,
+		},
+	})
 
-const trendData = [
-	{ name: 'Mon', sales: 60, target: 80 },
-	{ name: 'Tue', sales: 40, target: 50 },
-	{ name: 'Wed', sales: 90, target: 70 },
-	{ name: 'Thu', sales: 30, target: 40 },
-	{ name: 'Fri', sales: 50, target: 60 },
-	{ name: 'Sat', sales: 100, target: 90 },
-	{ name: 'Sun', sales: 80, target: 85 },
-]
+	if (!response.ok) {
+		throw new Error(`API Error: ${response.statusText}`)
+	}
+
+	return response.json()
+}
+
+// Mock data - will be replaced by API calls
+let assets = []
+
+const updates = []
+
+const trendData = []
 
 export function MetricCard({
 	title,
@@ -158,7 +123,7 @@ export function MetricCard({
 	)
 }
 
-export function TrendChart() {
+export function TrendChart({ data = trendData, isLoading = false }) {
 	return (
 		<div className="flex h-full flex-col rounded-xl bg-surface-container-lowest p-8 shadow-sm">
 			<div className="mb-8 flex items-center justify-between">
@@ -172,61 +137,73 @@ export function TrendChart() {
 					</span>
 				</div>
 			</div>
-			<div className="min-h-[300px] flex-1">
-				<ResponsiveContainer width="100%" height="100%">
-					<AreaChart data={trendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-						<defs>
-							<linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
-								<stop offset="5%" stopColor="#00346f" stopOpacity={0.1} />
-								<stop offset="95%" stopColor="#00346f" stopOpacity={0} />
-							</linearGradient>
-						</defs>
-						<XAxis
-							dataKey="name"
-							axisLine={false}
-							tickLine={false}
-							tick={{ fontSize: 10, fontWeight: 700, fill: '#c2c6d3' }}
-							dy={10}
-						/>
-						<YAxis hide />
-						<Tooltip
-							contentStyle={{
-								borderRadius: '8px',
-								border: 'none',
-								boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
-							}}
-						/>
-						<Area type="monotone" dataKey="sales" stroke="#00346f" strokeWidth={4} fillOpacity={1} fill="url(#colorSales)" />
-						<Area
-							type="monotone"
-							dataKey="target"
-							stroke="#abc7ff"
-							strokeWidth={3}
-							strokeDasharray="5 5"
-							fill="transparent"
-						/>
-					</AreaChart>
-				</ResponsiveContainer>
-			</div>
+			{isLoading ? (
+				<div className="min-h-75 flex-1 flex items-center justify-center">
+					<Loader size={24} className="animate-spin text-primary" />
+				</div>
+			) : (
+				<div className="min-h-75 flex-1">
+					<ResponsiveContainer width="100%" height="100%">
+						<AreaChart data={data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+							<defs>
+								<linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
+									<stop offset="5%" stopColor="#00346f" stopOpacity={0.1} />
+									<stop offset="95%" stopColor="#00346f" stopOpacity={0} />
+								</linearGradient>
+							</defs>
+							<XAxis
+								dataKey="name"
+								axisLine={false}
+								tickLine={false}
+								tick={{ fontSize: 10, fontWeight: 700, fill: '#c2c6d3' }}
+								dy={10}
+							/>
+							<YAxis hide />
+							<Tooltip
+								contentStyle={{
+									borderRadius: '8px',
+									border: 'none',
+									boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+								}}
+							/>
+							<Area type="monotone" dataKey="sales" stroke="#00346f" strokeWidth={4} fillOpacity={1} fill="url(#colorSales)" />
+							<Area
+								type="monotone"
+								dataKey="target"
+								stroke="#abc7ff"
+								strokeWidth={3}
+								strokeDasharray="5 5"
+								fill="transparent"
+							/>
+						</AreaChart>
+					</ResponsiveContainer>
+				</div>
+			)}
 		</div>
 	)
 }
 
-export function InboundFeed() {
+export function InboundFeed({ updates = [] }) {
 	return (
 		<div className="flex h-full flex-col rounded-xl bg-surface-container p-6 shadow-sm">
 			<h4 className="mb-6 text-lg font-extrabold tracking-tight text-on-surface">Stock Inbound Feed</h4>
 			<div className="flex-1 space-y-6">
-				{updates.map((item, idx) => (
-					<div key={idx} className={cn('flex gap-4', item.faded && 'opacity-60')}>
-						<div className={cn('h-12 w-2 rounded-full', item.color)} />
-						<div>
-							<p className="text-xs font-bold text-on-surface-variant">{item.time}</p>
-							<p className="text-sm font-bold text-on-surface">{item.title}</p>
-							<p className="text-xs font-medium text-on-surface-variant">{item.sub}</p>
+				{updates.length > 0 ? (
+					updates.map((item, idx) => (
+						<div key={idx} className={cn('flex gap-4', item.faded && 'opacity-60')}>
+							<div className={cn('h-12 w-2 rounded-full', item.color)} />
+							<div>
+								<p className="text-xs font-bold text-on-surface-variant">{item.time}</p>
+								<p className="text-sm font-bold text-on-surface">{item.title}</p>
+								<p className="text-xs font-medium text-on-surface-variant">{item.sub}</p>
+							</div>
 						</div>
+					))
+				) : (
+					<div className="flex items-center justify-center h-full text-on-surface-variant">
+						<p className="text-sm font-medium">No recent updates</p>
 					</div>
-				))}
+				)}
 			</div>
 			<button className="group mt-6 flex items-center gap-1 text-xs font-bold text-primary hover:underline">
 				View Detailed Log
@@ -236,7 +213,7 @@ export function InboundFeed() {
 	)
 }
 
-export function AssetTable() {
+export function AssetTable({ assets = [], isLoading = false }) {
 	return (
 		<div className="rounded-2xl bg-surface-container-lowest p-8 shadow-sm">
 			<div className="mb-6 flex items-center justify-between">
@@ -253,79 +230,168 @@ export function AssetTable() {
 			</div>
 
 			<div className="overflow-x-auto">
-				<table className="w-full text-left">
-					<thead>
-						<tr className="border-b border-surface-container text-[10px] font-black uppercase tracking-widest text-outline-variant">
-							<th className="px-2 pb-4">Part Specification</th>
-							<th className="px-2 pb-4">SKU Code</th>
-							<th className="px-2 pb-4">Velocity</th>
-							<th className="px-2 pb-4 text-right">In-Stock</th>
-							<th className="px-2 pb-4 text-right">Valuation</th>
-						</tr>
-					</thead>
-					<tbody className="divide-y divide-surface-container">
-						{assets.map((asset) => (
-							<tr key={asset.id} className="group transition-colors hover:bg-surface-container-low/50">
-								<td className="px-2 py-5">
-									<div className="flex items-center gap-3">
-										<div
+				{isLoading ? (
+					<div className="flex items-center justify-center h-64">
+						<Loader size={24} className="animate-spin text-primary" />
+					</div>
+				) : (
+					<table className="w-full text-left">
+						<thead>
+							<tr className="border-b border-surface-container text-[10px] font-black uppercase tracking-widest text-outline-variant">
+								<th className="px-2 pb-4">Part Specification</th>
+								<th className="px-2 pb-4">SKU Code</th>
+								<th className="px-2 pb-4">Velocity</th>
+								<th className="px-2 pb-4 text-right">In-Stock</th>
+								<th className="px-2 pb-4 text-right">Valuation</th>
+							</tr>
+						</thead>
+						<tbody className="divide-y divide-surface-container">
+							{assets.length > 0 ? (
+								assets.map((asset) => (
+									<tr key={asset.id} className="group transition-colors hover:bg-surface-container-low/50">
+										<td className="px-2 py-5">
+											<div className="flex items-center gap-3">
+												<div
+													className={cn(
+														'flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-surface-container',
+														asset.isCritical && 'text-red-500'
+													)}
+												>
+													{asset.icon ? (
+														<asset.icon size={20} />
+													) : (
+														<img
+															src={asset.img}
+															alt={asset.name}
+															className="h-full w-full object-cover"
+															referrerPolicy="no-referrer"
+														/>
+													)}
+												</div>
+												<div>
+													<p className="text-sm font-bold text-on-surface">{asset.name}</p>
+													<p className="text-[10px] text-on-surface-variant">{asset.category}</p>
+												</div>
+											</div>
+										</td>
+										<td className="px-2 py-5">
+											<span className="rounded bg-secondary-container px-2 py-0.5 text-[10px] font-bold text-primary-container">
+												{asset.sku}
+											</span>
+										</td>
+										<td className="px-2 py-5">
+											<div className="flex items-center gap-2">
+												<div className="h-1.5 w-24 overflow-hidden rounded-full bg-surface-container">
+													<div
+														className={cn(
+															'h-full',
+															asset.isCritical ? 'bg-red-500' : asset.velocity > 50 ? 'bg-primary' : 'bg-secondary'
+														)}
+														style={{ width: `${asset.velocity}%` }}
+													/>
+												</div>
+												<span
+													className={cn(
+														'text-xs font-bold',
+														asset.isCritical ? 'text-red-500' : 'text-on-surface'
+													)}
+												>
+													{asset.isCritical ? 'CRITICAL' : `${asset.velocity}%`}
+												</span>
+											</div>
+										</td>
+										<td
 											className={cn(
-												'flex h-10 w-10 flex-shrink-0 items-center justify-center overflow-hidden rounded-lg bg-surface-container',
-												asset.isCritical && 'text-red-500'
+												'px-2 py-5 text-right text-sm font-medium',
+												asset.isCritical && 'font-bold text-red-500'
 											)}
 										>
-											{asset.icon ? (
-												<asset.icon size={20} />
-											) : (
-												<img
-													src={asset.img}
-													alt={asset.name}
-													className="h-full w-full object-cover"
-													referrerPolicy="no-referrer"
-												/>
-											)}
-										</div>
-										<div>
-											<p className="text-sm font-bold text-on-surface">{asset.name}</p>
-											<p className="text-[10px] text-on-surface-variant">{asset.category}</p>
-										</div>
-									</div>
-								</td>
-								<td className="px-2 py-5">
-									<span className="rounded bg-secondary-container px-2 py-0.5 text-[10px] font-bold text-primary-container">
-										{asset.sku}
-									</span>
-								</td>
-								<td className="px-2 py-5">
-									<div className="flex items-center gap-2">
-										<div className="h-1.5 w-24 overflow-hidden rounded-full bg-surface-container">
-											<div
-												className={cn(
-													'h-full',
-													asset.isCritical ? 'bg-red-500' : asset.velocity > 50 ? 'bg-primary' : 'bg-secondary'
-												)}
-												style={{ width: `${asset.velocity}%` }}
-											/>
-										</div>
-										<span className={cn('text-xs font-bold', asset.isCritical ? 'text-red-500' : 'text-on-surface')}>
-											{asset.isCritical ? 'CRITICAL' : `${asset.velocity}%`}
-										</span>
-									</div>
-								</td>
-								<td className={cn('px-2 py-5 text-right text-sm font-medium', asset.isCritical && 'font-bold text-red-500')}>
-									{asset.stock}
-								</td>
-								<td className="px-2 py-5 text-right text-sm font-black text-primary">{asset.valuation}</td>
-							</tr>
-						))}
-					</tbody>
-				</table>
+											{asset.stock}
+										</td>
+										<td className="px-2 py-5 text-right text-sm font-black text-primary">{asset.valuation}</td>
+									</tr>
+								))
+							) : (
+								<tr>
+									<td colSpan="5" className="px-2 py-8 text-center text-on-surface-variant">
+										<p className="text-sm font-medium">No asset data available</p>
+									</td>
+								</tr>
+							)}
+						</tbody>
+					</table>
+				)}
 			</div>
 		</div>
 	)
 }
 
 function Dashboard() {
+	const [metrics, setMetrics] = useState({
+		totalStockValue: '$1,248,390',
+		totalStockValueTrend: '+12.5% from last month',
+		pendingBills: '42',
+		pendingBillsValue: '$14,200',
+		criticalAlerts: '09',
+		criticalAlertsMessage: 'Requires immediate replenishment',
+	})
+
+	const [chartData, setChartData] = useState(trendData)
+	const [topAssets, setTopAssets] = useState(assets)
+	const [stockUpdates, setStockUpdates] = useState(updates)
+	const [isLoading, setIsLoading] = useState(true)
+	const [error, setError] = useState(null)
+
+	useEffect(() => {
+		const loadDashboardData = async () => {
+			try {
+				setIsLoading(true)
+				setError(null)
+
+				// Single API call to get all dashboard metrics
+				const response = await apiCall('/dashboard/metrics')
+
+				if (response.data) {
+					const data = response.data
+
+					// Update metrics
+					setMetrics((prev) => ({
+						...prev,
+						totalStockValue: data.metrics.totalStockValue,
+						totalStockValueTrend: `+${((data.metrics.totalReceivables / 100) * 12.5).toFixed(1)}% from last period`,
+						pendingBills: String(data.metrics.pendingBills),
+						pendingBillsValue: data.metrics.pendingBillsValue,
+						criticalAlerts: String(data.metrics.criticalAlerts),
+					}))
+
+					// Update chart data
+					if (data.salesTrend && Array.isArray(data.salesTrend)) {
+						setChartData(data.salesTrend)
+					}
+
+					// Update top products/assets
+					if (data.topProducts && Array.isArray(data.topProducts)) {
+						setTopAssets(data.topProducts)
+					}
+
+					// Update stock logs/inbound feed
+					if (data.recentLogs && Array.isArray(data.recentLogs)) {
+						setStockUpdates(data.recentLogs)
+					}
+				}
+			} catch (err) {
+				console.error('Dashboard data load error:', err)
+				setError(err.message)
+			} finally {
+				setIsLoading(false)
+			}
+		}
+
+		loadDashboardData()
+		// Refresh data every 30 seconds
+		const interval = setInterval(loadDashboardData, 30000)
+		return () => clearInterval(interval)
+	}, [])
 	return (
 		<section className="relative">
 			<div className="flex-1 space-y-8 p-8">
@@ -337,10 +403,22 @@ function Dashboard() {
 
 					<div className="flex items-center gap-2 rounded-lg bg-surface-container-highest px-4 py-2 text-sm font-bold text-primary">
 						<Calendar size={16} />
-						Oct 24, 2023 - Today
+						{new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} - Today
 					</div>
 				</div>
 
+				{/* Error Banner */}
+				{error && (
+					<motion.div
+						initial={{ opacity: 0, y: -10 }}
+						animate={{ opacity: 1, y: 0 }}
+						className="bg-error/10 border border-error/20 rounded-lg p-4 text-sm font-medium text-error"
+					>
+						Unable to load dashboard data. Showing cached information. {error}
+					</motion.div>
+				)}
+
+				{/* Metrics Grid */}
 				<div className="grid grid-cols-1 gap-6 md:grid-cols-12">
 					<motion.div
 						className="md:col-span-4"
@@ -350,9 +428,9 @@ function Dashboard() {
 					>
 						<MetricCard
 							title="Total Stock Value"
-							value="$1,248,390"
+							value={metrics.totalStockValue}
 							icon={Plus}
-							trend="+12.5% from last month"
+							trend={metrics.totalStockValueTrend}
 							variant="primary"
 						/>
 					</motion.div>
@@ -365,9 +443,9 @@ function Dashboard() {
 					>
 						<MetricCard
 							title="Pending Bills"
-							value="42"
+							value={metrics.pendingBills}
 							status="Active"
-							subValue="$14,200"
+							subValue={metrics.pendingBillsValue}
 							icon={Wallet}
 							variant="secondary"
 						/>
@@ -381,15 +459,16 @@ function Dashboard() {
 					>
 						<MetricCard
 							title="Critical Alerts"
-							value="09"
+							value={metrics.criticalAlerts}
 							status="SKUs"
-							subValue="Requires immediate replenishment"
+							subValue={metrics.criticalAlertsMessage}
 							icon={AlertCircle}
 							variant="error"
 						/>
 					</motion.div>
 				</div>
 
+				{/* Charts Grid */}
 				<div className="grid grid-cols-1 gap-6 md:grid-cols-3">
 					<motion.div
 						className="md:col-span-2"
@@ -397,7 +476,7 @@ function Dashboard() {
 						animate={{ opacity: 1, y: 0 }}
 						transition={{ delay: 0.4 }}
 					>
-						<TrendChart />
+						<TrendChart data={chartData} isLoading={isLoading} />
 					</motion.div>
 
 					<motion.div
@@ -406,19 +485,21 @@ function Dashboard() {
 						animate={{ opacity: 1, y: 0 }}
 						transition={{ delay: 0.5 }}
 					>
-						<InboundFeed />
+						<InboundFeed updates={stockUpdates} />
 					</motion.div>
 				</div>
 
+				{/* Assets Table */}
 				<motion.div
 					initial={{ opacity: 0, y: 20 }}
 					animate={{ opacity: 1, y: 0 }}
 					transition={{ delay: 0.6 }}
 				>
-					<AssetTable />
+					<AssetTable assets={topAssets} isLoading={isLoading} />
 				</motion.div>
 			</div>
 
+			{/* FAB Button */}
 			<button className="group fixed right-8 bottom-8 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-primary text-white shadow-2xl transition-all hover:scale-110 active:scale-95">
 				<Plus size={24} className="transition-transform duration-300 group-hover:rotate-90" />
 				<span className="pointer-events-none absolute right-16 whitespace-nowrap rounded-lg bg-on-surface px-3 py-1.5 text-xs font-bold text-white opacity-0 transition-opacity group-hover:opacity-100">

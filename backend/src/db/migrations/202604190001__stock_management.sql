@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_locations_is_active ON locations(is_active);
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS stock_entries (
   id SERIAL PRIMARY KEY,
-  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
   location_id INTEGER NOT NULL REFERENCES locations(id),
   quantity INTEGER NOT NULL CHECK (quantity >= 0),
   batch_number VARCHAR(100) NOT NULL,
@@ -45,11 +45,11 @@ CREATE TABLE IF NOT EXISTS stock_entries (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   deleted_at TIMESTAMPTZ,
-  CONSTRAINT unique_batch_per_product_location UNIQUE (product_id, location_id, batch_number)
+  CONSTRAINT unique_batch_per_product_location UNIQUE (part_id, location_id, batch_number)
 );
 
 -- Create indexes for stock queries
-CREATE INDEX IF NOT EXISTS idx_stock_entries_product_id ON stock_entries(product_id);
+CREATE INDEX IF NOT EXISTS idx_stock_entries_product_id ON stock_entries(part_id);
 CREATE INDEX IF NOT EXISTS idx_stock_entries_location_id ON stock_entries(location_id);
 CREATE INDEX IF NOT EXISTS idx_stock_entries_batch_number ON stock_entries(batch_number);
 CREATE INDEX IF NOT EXISTS idx_stock_entries_expiry_date ON stock_entries(expiry_date);
@@ -90,17 +90,17 @@ CREATE INDEX IF NOT EXISTS idx_stock_logs_related_bill ON stock_logs(related_bil
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS low_stock_alerts (
   id SERIAL PRIMARY KEY,
-  product_id INTEGER NOT NULL REFERENCES products(id),
+  part_id INTEGER NOT NULL REFERENCES parts(id),
   minimum_quantity INTEGER NOT NULL,
   alert_threshold INTEGER NOT NULL,
   is_active BOOLEAN DEFAULT TRUE,
   notified_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(product_id)
+  UNIQUE(part_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_low_stock_product ON low_stock_alerts(product_id);
+CREATE INDEX IF NOT EXISTS idx_low_stock_product ON low_stock_alerts(part_id);
 CREATE INDEX IF NOT EXISTS idx_low_stock_is_active ON low_stock_alerts(is_active);
 
 -- ===========================================================================
@@ -153,8 +153,8 @@ SELECT
   COUNT(DISTINCT se.batch_number) as batch_count,
   MIN(se.expiry_date) as earliest_expiry,
   COUNT(DISTINCT se.location_id) as location_count
-FROM products p
-LEFT JOIN stock_entries se ON p.id = se.product_id AND se.deleted_at IS NULL
+FROM parts p
+LEFT JOIN stock_entries se ON p.id = se.part_id AND se.deleted_at IS NULL
 GROUP BY p.id, p.name;
 
 -- View: Stock by location hierarchy
@@ -169,7 +169,7 @@ SELECT
   COUNT(DISTINCT se.batch_number) as batches
 FROM locations l
 LEFT JOIN stock_entries se ON l.id = se.location_id AND se.deleted_at IS NULL
-LEFT JOIN products p ON se.product_id = p.id
+LEFT JOIN parts p ON se.part_id = p.id
 GROUP BY l.id, l.name, l.type, l.parent_id, p.name;
 
 -- View: Expiring stock within 30 days
@@ -183,7 +183,7 @@ SELECT
   se.expiry_date,
   (se.expiry_date - CURRENT_DATE) as days_until_expiry
 FROM stock_entries se
-JOIN products p ON se.product_id = p.id
+JOIN parts p ON se.part_id = p.id
 JOIN locations l ON se.location_id = l.id
 WHERE se.deleted_at IS NULL
   AND se.expiry_date IS NOT NULL
@@ -200,9 +200,9 @@ SELECT
   lsa.minimum_quantity,
   lsa.alert_threshold,
   (COALESCE(SUM(se.quantity), 0) <= lsa.alert_threshold) as is_below_threshold
-FROM products p
-LEFT JOIN stock_entries se ON p.id = se.product_id AND se.deleted_at IS NULL
-LEFT JOIN low_stock_alerts lsa ON p.id = lsa.product_id AND lsa.is_active = TRUE
+FROM parts p
+LEFT JOIN stock_entries se ON p.id = se.part_id AND se.deleted_at IS NULL
+LEFT JOIN low_stock_alerts lsa ON p.id = lsa.part_id AND lsa.is_active = TRUE
 WHERE lsa.id IS NOT NULL
 GROUP BY p.id, p.name, lsa.minimum_quantity, lsa.alert_threshold;
 
@@ -227,7 +227,7 @@ EXECUTE FUNCTION update_stock_entries_timestamp();
 -- Create function to add stock entry with audit log
 -- ===========================================================================
 CREATE OR REPLACE FUNCTION add_stock_entry(
-  p_product_id INTEGER,
+  p_part_id INTEGER,
   p_location_id INTEGER,
   p_quantity INTEGER,
   p_batch_number VARCHAR,
@@ -245,10 +245,10 @@ DECLARE
 BEGIN
   -- Insert stock entry
   INSERT INTO stock_entries (
-    product_id, location_id, quantity, batch_number,
+    part_id, location_id, quantity, batch_number,
     supplier_id, incoming_bill_id, expiry_date, unit_cost, created_by
   )
-  VALUES (p_product_id, p_location_id, p_quantity, p_batch_number,
+  VALUES (p_part_id, p_location_id, p_quantity, p_batch_number,
           p_supplier_id, p_bill_id, p_expiry_date, p_unit_cost, p_created_by)
   RETURNING stock_entries.id INTO v_entry_id;
 

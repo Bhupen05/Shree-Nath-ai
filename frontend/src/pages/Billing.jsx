@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import {
   Receipt,
   PlusCircle,
@@ -21,54 +21,46 @@ import {
   ListFilter,
   ShieldCheck,
   UploadCloud,
+  Loader,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
 
-// Mock Data
-const BILLING_DATA = [
-  {
-    id: '1',
-    ref: 'SB-2024-001',
-    party: 'Apex Motors Corp',
-    partyType: 'Customer (Tier 1)',
-    initials: 'AM',
-    date: 'May 24, 2024',
-    amount: '$12,450.00',
-    status: 'Confirmed',
-  },
-  {
-    id: '2',
-    ref: 'PB-2024-882',
-    party: 'Zenith Steelworks',
-    partyType: 'Supplier',
-    initials: 'ZS',
-    date: 'May 22, 2024',
-    amount: '$45,000.00',
-    status: 'Overdue',
-  },
-  {
-    id: '3',
-    ref: 'SB-2024-002',
-    party: 'Delta Logistics LLC',
-    partyType: 'Customer (Standard)',
-    initials: 'DL',
-    date: 'May 20, 2024',
-    amount: '$3,120.00',
-    status: 'Paid',
-  },
-  {
-    id: '4',
-    ref: 'SB-2024-D09',
-    party: 'Global One Distro',
-    partyType: 'Customer (Draft)',
-    initials: 'G1',
-    date: 'In Progress',
-    amount: '$8,900.00',
-    status: 'Draft',
-  },
-]
+// API Configuration
+const API_BASE = 'http://localhost:5000/api'
 
-const CASH_FLOW_DATA = [40, 60, 45, 80, 95, 70, 90]
+async function apiCall(endpoint, options = {}) {
+  const token = localStorage.getItem('auth_token')
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token && { Authorization: `Bearer ${token}` }),
+    ...options.headers,
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers,
+    })
+
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status}`)
+    }
+
+    return await response.json()
+  } catch (err) {
+    console.error(`API call failed for ${endpoint}:`, err)
+    throw err
+  }
+}
+
+function getAuthToken() {
+  return localStorage.getItem('auth_token')
+}
+
+// Mock Data - Will be fetched from API
+const BILLING_DATA = []
+
+const CASH_FLOW_DATA = []
 
 // Components
 
@@ -88,12 +80,17 @@ const StatusChip = ({ status }) => {
 }
 
 // Create Purchase Bill Modal Component
-function CreatePurchaseBillModal({ isOpen, onClose }) {
+function CreatePurchaseBillModal({ isOpen, onClose, onSuccess }) {
+  const [supplierId, setSupplierId] = useState('1')
+  const [billRef, setBillRef] = useState('')
+  const [purchaseDate, setPurchaseDate] = useState(new Date().toISOString().split('T')[0])
   const [items, setItems] = useState([
     { id: '1', name: 'Hydraulic Pressure Valve - XV90', sku: 'PV-90234-B', quantity: 12, unitPrice: 125.00 },
     { id: '2', name: 'Industrial Gasket Sealant (Bulk)', sku: 'GS-7712-L', quantity: 50, unitPrice: 18.50 },
   ])
   const [shipping, setShipping] = useState(45.00)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState(null)
 
   const subtotal = items.reduce((acc, item) => acc + item.quantity * item.unitPrice, 0)
   const tax = subtotal * 0.1
@@ -105,6 +102,46 @@ function CreatePurchaseBillModal({ isOpen, onClose }) {
 
   const removeItem = (id) => {
     setItems(items.filter((item) => item.id !== id))
+  }
+
+  const handleSubmit = async () => {
+    if (!supplierId || !billRef || !purchaseDate || items.length === 0) {
+      setSubmitError('Please fill in all required fields')
+      return
+    }
+
+    try {
+      setIsSubmitting(true)
+      setSubmitError(null)
+
+      const payload = {
+        partyId: parseInt(supplierId),
+        billType: 'PURCHASE',
+        billNumber: billRef,
+        billDate: purchaseDate,
+        total: items.reduce((acc, item) => acc + item.quantity * item.unitPrice, 0) + shipping,
+        items: items.map(item => ({
+          partId: parseInt(item.sku.split('-')[0]) || 1,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+        }))
+      }
+
+      const response = await apiCall('/billing/create-bill', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      })
+
+      if (response) {
+        onClose()
+        if (onSuccess) onSuccess()
+      }
+    } catch (err) {
+      setSubmitError(err.message || 'Failed to create bill')
+      console.error('Bill creation error:', err)
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
   return (
@@ -153,18 +190,23 @@ function CreatePurchaseBillModal({ isOpen, onClose }) {
                         <div className="grid grid-cols-2 gap-8">
                           <div className="space-y-2">
                             <label className="text-xs font-bold text-outline uppercase tracking-wider">Supplier Name</label>
-                            <select className="w-full bg-surface-container-low border-none rounded-lg p-3 text-sm focus:ring-2 focus:ring-primary appearance-none outline-none cursor-pointer">
-                              <option>Select a supplier</option>
-                              <option>Titan Heavy Ind.</option>
-                              <option>Apex Global Logistics</option>
-                              <option>Precision Steel Components</option>
+                            <select
+                              value={supplierId}
+                              onChange={(e) => setSupplierId(e.target.value)}
+                              className="w-full bg-surface-container-low border-none rounded-lg p-3 text-sm focus:ring-2 focus:ring-primary appearance-none outline-none cursor-pointer"
+                            >
+                              <option value="">Select a supplier</option>
+                              <option value="1">Titan Heavy Ind.</option>
+                              <option value="2">Apex Global Logistics</option>
+                              <option value="3">Precision Steel Components</option>
                             </select>
                           </div>
                           <div className="space-y-2">
                             <label className="text-xs font-bold text-outline uppercase tracking-wider">Purchase Date</label>
                             <input
                               type="date"
-                              defaultValue="2026-04-21"
+                              value={purchaseDate}
+                              onChange={(e) => setPurchaseDate(e.target.value)}
                               className="w-full bg-surface-container-low border-none rounded-lg p-3 text-sm focus:ring-2 focus:ring-primary outline-none"
                             />
                           </div>
@@ -173,6 +215,8 @@ function CreatePurchaseBillModal({ isOpen, onClose }) {
                             <input
                               type="text"
                               placeholder="e.g. PB-2023-001"
+                              value={billRef}
+                              onChange={(e) => setBillRef(e.target.value)}
                               className="w-full bg-surface-container-low border-none rounded-lg p-3 text-sm focus:ring-2 focus:ring-primary outline-none"
                             />
                           </div>
@@ -365,20 +409,28 @@ function CreatePurchaseBillModal({ isOpen, onClose }) {
 
               {/* Modal Footer */}
               <div className="sticky bottom-0 border-t border-outline-variant/10 bg-surface-container-lowest p-6">
+                {submitError && (
+                  <div className="mb-4 text-sm font-medium text-error bg-error/10 border border-error/20 rounded-lg p-3">
+                    {submitError}
+                  </div>
+                )}
                 <div className="flex items-center justify-end gap-4">
                   <button
                     onClick={onClose}
-                    className="rounded-lg bg-secondary-container/30 px-6 py-2.5 text-sm font-bold text-primary transition-all hover:bg-secondary-container/50"
+                    disabled={isSubmitting}
+                    className="rounded-lg bg-secondary-container/30 px-6 py-2.5 text-sm font-bold text-primary transition-all hover:bg-secondary-container/50 disabled:opacity-50"
                   >
                     Save as Draft
                   </button>
                   <motion.button
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
-                    className="flex items-center gap-2 rounded-lg bg-linear-to-b from-primary to-primary-container px-8 py-2.5 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all"
+                    onClick={handleSubmit}
+                    disabled={isSubmitting}
+                    className="flex items-center gap-2 rounded-lg bg-linear-to-b from-primary to-primary-container px-8 py-2.5 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all disabled:opacity-50"
                   >
-                    <FileText size={18} />
-                    Confirm & Update Stock
+                    {isSubmitting ? <Loader size={16} className="animate-spin" /> : <FileText size={18} />}
+                    {isSubmitting ? 'Creating...' : 'Confirm & Create Bill'}
                   </motion.button>
                 </div>
               </div>
@@ -780,6 +832,46 @@ function CreateBillModal({ isOpen, onClose }) {
 export default function Billing() {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [stats, setStats] = useState({
+    totalReceivables: 0,
+    overdueAmount: 0,
+    netCashFlow: 0,
+    overdueCount: 0,
+  })
+  const [salesBills, setSalesBills] = useState([])
+  const [purchaseBills, setPurchaseBills] = useState([])
+
+  useEffect(() => {
+    const loadBillingData = async () => {
+      try {
+        setIsLoading(true)
+        const response = await apiCall('/billing/metrics')
+        
+        if (response.data) {
+          const data = response.data
+          setStats({
+            totalReceivables: data.stats?.totalReceivables || 0,
+            overdueAmount: data.stats?.overdueAmount || 0,
+            netCashFlow: data.stats?.netCashFlow || 0,
+            overdueCount: data.stats?.overdueCount || 0,
+          })
+          setSalesBills(data.salesBills || [])
+          setPurchaseBills(data.purchaseBills || [])
+        }
+      } catch (err) {
+        console.error('Error loading billing data:', err)
+        setError(err.message)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    loadBillingData()
+    const interval = setInterval(loadBillingData, 60000) // Refresh every 60 seconds
+    return () => clearInterval(interval)
+  }, [])
 
   return (
     <div className="space-y-8 p-8">
@@ -810,6 +902,12 @@ export default function Billing() {
       </div>
 
       {/* KPI Cards */}
+      {error && (
+        <div className="rounded-2xl bg-error-container/10 border border-error/20 p-4 text-on-error-container">
+          <p className="text-sm font-medium">Unable to load billing data. Showing cached data.</p>
+        </div>
+      )}
+
       <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -820,7 +918,9 @@ export default function Billing() {
             <Wallet className="h-12 w-12" />
           </div>
           <p className="mb-2 text-xs font-bold uppercase tracking-wider text-on-surface-variant">Total Receivables</p>
-          <h3 className="text-3xl font-black text-on-surface">$428,150.00</h3>
+          <h3 className="text-3xl font-black text-on-surface">
+            {isLoading ? <Loader size={24} className="animate-spin" /> : `$${stats.totalReceivables.toLocaleString('en-US', { minimumFractionDigits: 2 })}`}
+          </h3>
           <div className="mt-4 flex items-center text-xs font-bold text-primary">
             <TrendingUp className="mr-1.5 h-4 w-4" />
             <span>+12.5% from last month</span>
@@ -837,10 +937,12 @@ export default function Billing() {
             <AlertCircle className="h-12 w-12" />
           </div>
           <p className="mb-2 text-xs font-bold uppercase tracking-wider text-on-surface-variant">Overdue Amount</p>
-          <h3 className="text-3xl font-black text-on-surface">$34,200.50</h3>
+          <h3 className="text-3xl font-black text-on-surface">
+            {isLoading ? <Loader size={24} className="animate-spin" /> : `$${stats.overdueAmount.toLocaleString('en-US', { minimumFractionDigits: 2 })}`}
+          </h3>
           <div className="mt-4 flex items-center text-xs font-bold text-error">
             <AlertCircle className="mr-1.5 h-4 w-4" />
-            <span>14 items require attention</span>
+            <span>{stats.overdueCount} items require attention</span>
           </div>
         </motion.div>
 
@@ -854,14 +956,16 @@ export default function Billing() {
             <div className="flex items-start justify-between">
               <div>
                 <p className="mb-1 text-xs font-bold uppercase tracking-wider text-on-primary/60">Net Cash Flow</p>
-                <h3 className="text-3xl font-black">$182,400.00</h3>
+                <h3 className="text-3xl font-black">
+                  {isLoading ? <Loader size={24} className="animate-spin" /> : `$${stats.netCashFlow.toLocaleString('en-US', { minimumFractionDigits: 2 })}`}
+                </h3>
               </div>
               <div className="rounded-full bg-on-primary/10 px-3 py-1 text-[10px] font-bold">LIVE METRIC</div>
             </div>
           </div>
 
           <div className="relative z-10 mt-6 flex items-end space-x-1.5 px-1 h-16">
-            {CASH_FLOW_DATA.map((val, i) => (
+            {[40, 60, 45, 80, 95, 70, 90].map((val, i) => (
               <div
                 key={i}
                 style={{ height: `${val}%` }}
@@ -907,85 +1011,91 @@ export default function Billing() {
       {/* Data Table */}
       <section className="overflow-hidden rounded-3xl border border-outline-variant/10 bg-surface-container-lowest shadow-xl shadow-black/5">
         <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead>
-              <tr className="bg-surface-container-low/30">
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
-                  REF
-                </th>
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
-                  Party / Entity
-                </th>
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
-                  Date
-                </th>
-                <th className="px-6 py-4 text-right text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
-                  Amount
-                </th>
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
-                  Status
-                </th>
-                <th className="px-6 py-4 w-10" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-outline-variant/5 text-sm">
-              {BILLING_DATA.map((row) => (
-                <tr key={row.id} className="transition-colors hover:bg-surface-container-low/20 group">
-                  <td className="px-6 py-5">
-                    <span className="rounded-lg bg-primary/5 px-2.5 py-1 font-mono text-[11px] font-bold text-primary">
-                      {row.ref}
-                    </span>
-                  </td>
-                  <td className="px-6 py-5">
-                    <div className="flex items-center space-x-3">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-surface-container text-[11px] font-black text-on-surface-variant ring-1 ring-outline-variant/10">
-                        {row.initials}
-                      </div>
-                      <div>
-                        <p className="leading-tight font-bold text-on-surface">{row.party}</p>
-                        <p className="mt-0.5 text-[10px] font-medium text-on-surface-variant">{row.partyType}</p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-5 font-medium text-on-surface-variant">{row.date}</td>
-                  <td className="px-6 py-5 text-right font-black text-on-surface">{row.amount}</td>
-                  <td className="px-6 py-5">
-                    <StatusChip status={row.status} />
-                  </td>
-                  <td className="px-6 py-5 text-right">
-                    <button className="rounded-lg p-1 transition-opacity opacity-40 hover:bg-surface-container hover:opacity-100">
-                      <MoreVertical className="h-4 w-4 text-on-surface-variant" />
-                    </button>
-                  </td>
+          {isLoading ? (
+            <div className="flex items-center justify-center h-64 w-full">
+              <Loader size={32} className="animate-spin text-primary" />
+            </div>
+          ) : salesBills.length > 0 || purchaseBills.length > 0 ? (
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-surface-container-low/30">
+                  <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
+                    REF
+                  </th>
+                  <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
+                    Party / Entity
+                  </th>
+                  <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
+                    Date
+                  </th>
+                  <th className="px-6 py-4 text-right text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
+                    Amount
+                  </th>
+                  <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-on-surface-variant/50">
+                    Status
+                  </th>
+                  <th className="px-6 py-4 w-10" />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-outline-variant/5 text-sm">
+                {[...salesBills, ...purchaseBills].map((row) => (
+                  <tr key={row.id} className="transition-colors hover:bg-surface-container-low/20 group">
+                    <td className="px-6 py-5">
+                      <span className="rounded-lg bg-primary/5 px-2.5 py-1 font-mono text-[11px] font-bold text-primary">
+                        {row.referenceNumber}
+                      </span>
+                    </td>
+                    <td className="px-6 py-5">
+                      <div className="flex items-center space-x-3">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-surface-container text-[11px] font-black text-on-surface-variant ring-1 ring-outline-variant/10">
+                          {row.party?.name?.substring(0, 2).toUpperCase() || 'N/A'}
+                        </div>
+                        <div>
+                          <p className="leading-tight font-bold text-on-surface">{row.party?.name || 'Unknown'}</p>
+                          <p className="mt-0.5 text-[10px] font-medium text-on-surface-variant">{row.party?.type || 'Entity'}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-5 font-medium text-on-surface-variant">{new Date(row.date).toLocaleDateString()}</td>
+                    <td className="px-6 py-5 text-right font-black text-on-surface">${row.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                    <td className="px-6 py-5">
+                      <StatusChip status={row.status} />
+                    </td>
+                    <td className="px-6 py-5 text-right">
+                      <button className="rounded-lg p-1 transition-opacity opacity-40 hover:bg-surface-container hover:opacity-100">
+                        <MoreVertical className="h-4 w-4 text-on-surface-variant" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="flex items-center justify-center h-64 w-full text-on-surface-variant">
+              <p className="text-sm font-medium">No billing data available</p>
+            </div>
+          )}
         </div>
 
         {/* Pagination */}
-        <div className="flex items-center justify-between border-t border-outline-variant/5 bg-surface-container-low/10 px-6 py-5">
-          <p className="text-xs font-bold text-on-surface-variant">Showing 4 of 128 results</p>
-          <div className="flex items-center space-x-1">
-            <button className="rounded-xl p-2 text-on-surface-variant transition-all hover:bg-surface-container">
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-            <div className="flex space-x-1 px-1">
-              <button className="h-8 w-8 rounded-lg bg-primary text-xs font-black text-on-primary shadow-md shadow-primary/20 transition-all">
-                1
+        {!isLoading && (salesBills.length > 0 || purchaseBills.length > 0) && (
+          <div className="flex items-center justify-between border-t border-outline-variant/5 bg-surface-container-low/10 px-6 py-5">
+            <p className="text-xs font-bold text-on-surface-variant">Showing {(salesBills.length + purchaseBills.length)} of {(salesBills.length + purchaseBills.length)} results</p>
+            <div className="flex items-center space-x-1">
+              <button className="rounded-xl p-2 text-on-surface-variant transition-all hover:bg-surface-container">
+                <ChevronLeft className="h-4 w-4" />
               </button>
-              <button className="h-8 w-8 rounded-lg text-xs font-black text-on-surface-variant transition-all hover:bg-surface-container">
-                2
-              </button>
-              <button className="h-8 w-8 rounded-lg text-xs font-black text-on-surface-variant transition-all hover:bg-surface-container">
-                3
+              <div className="flex space-x-1 px-1">
+                <button className="h-8 w-8 rounded-lg bg-primary text-xs font-black text-on-primary shadow-md shadow-primary/20 transition-all">
+                  1
+                </button>
+              </div>
+              <button className="rounded-xl p-2 text-on-surface-variant transition-all hover:bg-surface-container">
+                <ChevronRight className="h-4 w-4" />
               </button>
             </div>
-            <button className="rounded-xl p-2 text-on-surface-variant transition-all hover:bg-surface-container">
-              <ChevronRight className="h-4 w-4" />
-            </button>
           </div>
-        </div>
+        )}
       </section>
 
       {/* Create Bill Modal */}

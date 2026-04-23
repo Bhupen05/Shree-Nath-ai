@@ -82,12 +82,31 @@ async function initializeSchema() {
         id SERIAL PRIMARY KEY,
         name VARCHAR(150) NOT NULL,
         contact_name VARCHAR(100),
+        contact_person VARCHAR(100),
         phone VARCHAR(15),
         email VARCHAR(120),
         address TEXT,
         gstin VARCHAR(20),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        category VARCHAR(100),
+        status VARCHAR(50) DEFAULT 'Active',
+        audit_score INTEGER DEFAULT 100,
+        is_pending_audit BOOLEAN DEFAULT FALSE,
+        outstanding_balance NUMERIC(12,2) DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+    `);
+
+    // Add missing columns to existing suppliers tables
+    await client.query(`
+      ALTER TABLE suppliers
+      ADD COLUMN IF NOT EXISTS contact_person VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS category VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'Active',
+      ADD COLUMN IF NOT EXISTS audit_score INTEGER DEFAULT 100,
+      ADD COLUMN IF NOT EXISTS is_pending_audit BOOLEAN DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS outstanding_balance NUMERIC(12,2) DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
     `);
 
     await client.query(`
@@ -294,9 +313,14 @@ async function initializeSchema() {
       CREATE TABLE IF NOT EXISTS suppliers (
         id SERIAL PRIMARY KEY,
         name VARCHAR(150) NOT NULL,
+        category VARCHAR(100),
+        contact_person VARCHAR(100),
         phone VARCHAR(30),
         email VARCHAR(255),
         address TEXT,
+        status VARCHAR(20) NOT NULL DEFAULT 'Active',
+        is_pending_audit BOOLEAN NOT NULL DEFAULT FALSE,
+        audit_score INTEGER,
         outstanding_balance NUMERIC(12,2) NOT NULL DEFAULT 0,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

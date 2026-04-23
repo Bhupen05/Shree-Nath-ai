@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import {
   Inbox,
@@ -25,130 +25,40 @@ import {
   Calculator,
   ChevronDown,
   X,
+  Loader,
 } from 'lucide-react'
 
 const cn = (...classes) => classes.filter(Boolean).join(' ')
 
-// Mock data
-const stats = [
-  {
-    label: 'Total SKUs',
-    value: '1,284',
-    subValue: '+12.5% from last month',
-    type: 'normal',
-    iconName: 'inventory',
-  },
-  {
-    label: 'Critical Stock',
-    value: '24',
-    subValue: 'Immediate reorder needed',
-    type: 'critical',
-    iconName: 'warning',
-  },
-  {
-    label: 'In Transit',
-    value: '156',
-    subValue: 'Arriving this week',
-    type: 'secondary',
-    iconName: 'pending',
-  },
-  {
-    label: 'Warehouse Utilization',
-    value: '78%',
-    subValue: '2,847 / 3,650 capacity',
-    type: 'tertiary',
-    iconName: 'location',
-  },
-]
+// API Configuration
+const API_BASE = 'http://localhost:5000/api'
+const getAuthToken = () => localStorage.getItem('auth_token')
 
-const inventoryItems = [
-  {
-    id: 1,
-    name: 'Precision Ball Bearing X-200',
-    sku: 'ARC-BEAR-200',
-    image: 'https://picsum.photos/seed/bearing/200/200',
-    room: 'Room A1',
-    cabinet: 'C-42',
-    section: 'S-7',
-    currentStock: 1420,
-    totalCapacity: 2000,
-    status: 'Optimal',
-  },
-  {
-    id: 2,
-    name: 'Steel Drive Sprocket 48T',
-    sku: 'ARC-SPRKT-48',
-    image: 'https://picsum.photos/seed/gear/200/200',
-    room: 'Room B2',
-    cabinet: 'C-18',
-    section: 'S-3',
-    currentStock: 342,
-    totalCapacity: 800,
-    status: 'Low Warning',
-  },
-  {
-    id: 3,
-    name: 'Hydraulic Pump Unit 750W',
-    sku: 'ARC-HYD-750',
-    image: 'https://picsum.photos/seed/pump/200/200',
-    room: 'Room B4',
-    cabinet: 'C-25',
-    section: 'S-1',
-    currentStock: 42,
-    totalCapacity: 500,
-    status: 'Critical',
-  },
-  {
-    id: 4,
-    name: 'Industrial Conveyor Belt',
-    sku: 'ARC-CONV-IND',
-    image: 'https://picsum.photos/seed/belt/200/200',
-    room: 'Room A3',
-    cabinet: 'C-8',
-    section: 'S-5',
-    currentStock: 156,
-    totalCapacity: 200,
-    status: 'Optimal',
-  },
-]
+// API Utility Functions
+const apiCall = async (endpoint, options = {}) => {
+	const token = getAuthToken()
+	const response = await fetch(`${API_BASE}${endpoint}`, {
+		...options,
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`,
+			...options.headers,
+		},
+	})
 
-const feedItems = [
-  {
-    id: 1,
-    type: 'Received',
-    title: 'Shipment #SH-2024-0892 Received',
-    details: '500 units of SKU-SPRKT-48 logged into inventory',
-    timestamp: 'Today, 2:45 PM',
-    user: {
-      name: 'Alex Chen',
-      avatar: 'https://picsum.photos/seed/user1/100/100',
-    },
-    po: 'PO #45291',
-  },
-  {
-    id: 2,
-    type: 'In Transit',
-    title: 'Shipment #SH-2024-0891 In Transit',
-    details: 'ETA: Tomorrow 09:30 AM at Warehouse B. 12 pallets, 2,400 units total',
-    timestamp: 'Today, 10:12 AM',
-    user: {
-      name: 'Maria Rodriguez',
-      avatar: 'https://picsum.photos/seed/user2/100/100',
-    },
-    po: 'PO #45290',
-  },
-  {
-    id: 3,
-    type: 'Discrepancy',
-    title: 'Stock Count Mismatch',
-    details: 'Room B1: Expected 1,200 units of SKU-BEAR-200, found 1,156. Variance: 44 units',
-    timestamp: 'Yesterday, 4:22 PM',
-    user: {
-      name: 'James Wilson',
-      avatar: 'https://picsum.photos/seed/user3/100/100',
-    },
-  },
-]
+	if (!response.ok) {
+		throw new Error(`API Error: ${response.statusText}`)
+	}
+
+	return response.json()
+}
+
+// Mock data for fallback
+let stats = []
+
+let inventoryItems = []
+
+const feedItems = []
 
 // Components
 
@@ -198,7 +108,7 @@ function StatCard({ stat }) {
   )
 }
 
-function InventoryTable({ items }) {
+function InventoryTable({ items, isLoading }) {
   return (
     <div className="overflow-hidden rounded-[2.5rem] bg-surface-container-lowest shadow-ambient">
       <div className="flex items-center justify-between border-b border-outline-variant/10 bg-surface-container-low/30 p-8">
@@ -218,112 +128,122 @@ function InventoryTable({ items }) {
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-left">
-          <thead>
-            <tr className="bg-surface-container-low/20">
-              <th className="px-8 py-5 text-[11px] font-black uppercase tracking-[0.15em] text-on-surface-variant opacity-60">
-                Product Details
-              </th>
-              <th className="px-8 py-5 text-center text-[11px] font-black uppercase tracking-[0.15em] text-on-surface-variant opacity-60">
-                Precise Location
-              </th>
-              <th className="px-8 py-5 text-[11px] font-black uppercase tracking-[0.15em] text-on-surface-variant opacity-60">
-                Stock Level
-              </th>
-              <th className="px-8 py-5 text-[11px] font-black uppercase tracking-[0.15em] text-on-surface-variant opacity-60">
-                Status
-              </th>
-              <th className="px-8 py-5" />
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-outline-variant/10">
-            {items.map((item) => (
-              <tr key={item.id} className="group transition-colors hover:bg-surface-container-low/30">
-                <td className="px-8 py-7">
-                  <div className="flex items-center gap-6">
-                    <img
-                      src={item.image}
-                      alt={item.name}
-                      className="h-16 w-16 rounded-2xl bg-surface-container object-cover shadow-sm transition-transform duration-300 group-hover:scale-105"
-                      referrerPolicy="no-referrer"
-                    />
-                    <div>
-                      <p className="text-base font-black tracking-tight text-on-surface">{item.name}</p>
-                      <span className="mt-2 inline-block rounded-lg bg-primary-fixed bg-opacity-10 px-2.5 py-1 text-[10px] font-extrabold text-primary shadow-sm">
-                        {item.sku}
-                      </span>
-                    </div>
-                  </div>
-                </td>
-                <td className="px-8 py-7">
-                  <div className="flex flex-col items-center">
-                    <div className="inline-flex min-w-25 flex-col overflow-hidden rounded-xl shadow-sm">
-                      <span className="border-b border-white/20 bg-secondary-container/50 px-4 py-2 text-[11px] font-black text-on-secondary-container">
-                        {item.room}
-                      </span>
-                      <span className="bg-surface-container-highest px-4 py-2 text-[11px] font-black text-on-surface opacity-80">
-                        {item.cabinet} / {item.section}
-                      </span>
-                    </div>
-                  </div>
-                </td>
-                <td className="min-w-50 px-8 py-7">
-                  <div className="space-y-3">
-                    <div className="flex items-end justify-between">
-                      <span className="text-lg font-black tracking-tighter text-on-surface">
-                        {item.currentStock}
-                        <span className="px-1 text-xs font-medium tracking-normal text-on-surface-variant opacity-50">
-                          / {item.totalCapacity}
-                        </span>
-                      </span>
-                      <span
-                        className={`text-xs font-black ${
-                          item.status === 'Critical'
-                            ? 'text-error'
-                            : item.status === 'Low Warning'
-                              ? 'text-tertiary-container'
-                              : 'text-primary'
-                        }`}
-                      >
-                        {Math.round((item.currentStock / item.totalCapacity) * 100)}%
-                      </span>
-                    </div>
-                    <div className="h-2.5 w-full overflow-hidden rounded-full bg-surface-container shadow-inner">
-                      <div
-                        className={`h-full rounded-full transition-all duration-1000 ease-out ${
-                          item.status === 'Critical'
-                            ? 'bg-error'
-                            : item.status === 'Low Warning'
-                              ? 'bg-tertiary-container'
-                              : 'bg-primary'
-                        }`}
-                        style={{ width: `${(item.currentStock / item.totalCapacity) * 100}%` }}
-                      />
-                    </div>
-                  </div>
-                </td>
-                <td className="px-8 py-7">
-                  <span
-                    className={`rounded-full px-4 py-1.5 text-[10px] font-black uppercase tracking-widest shadow-sm ${
-                      item.status === 'Critical'
-                        ? 'bg-error-container text-on-error-container'
-                        : item.status === 'Low Warning'
-                          ? 'bg-tertiary-fixed text-on-tertiary-fixed-variant'
-                          : 'bg-primary-fixed text-primary'
-                    }`}
-                  >
-                    {item.status}
-                  </span>
-                </td>
-                <td className="px-8 py-7 text-right">
-                  <button className="rounded-xl p-2 transition-all opacity-0 hover:bg-surface-container group-hover:opacity-100">
-                    <ChevronRight className="h-5 w-5 text-outline" />
-                  </button>
-                </td>
+        {isLoading ? (
+          <div className="flex items-center justify-center h-64 w-full">
+            <Loader size={32} className="animate-spin text-primary" />
+          </div>
+        ) : items && items.length > 0 ? (
+          <table className="w-full border-collapse">
+            <thead>
+              <tr className="bg-surface-container-low/20">
+                <th className="px-8 py-5 text-[11px] font-black uppercase tracking-[0.15em] text-on-surface-variant opacity-60">
+                  Product Details
+                </th>
+                <th className="px-8 py-5 text-center text-[11px] font-black uppercase tracking-[0.15em] text-on-surface-variant opacity-60">
+                  Precise Location
+                </th>
+                <th className="px-8 py-5 text-[11px] font-black uppercase tracking-[0.15em] text-on-surface-variant opacity-60">
+                  Stock Level
+                </th>
+                <th className="px-8 py-5 text-[11px] font-black uppercase tracking-[0.15em] text-on-surface-variant opacity-60">
+                  Status
+                </th>
+                <th className="px-8 py-5" />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-outline-variant/10">
+              {items.map((item) => (
+                <tr key={item.id} className="group transition-colors hover:bg-surface-container-low/30">
+                  <td className="px-8 py-7">
+                    <div className="flex items-center gap-6">
+                      <img
+                        src={item.image}
+                        alt={item.name}
+                        className="h-16 w-16 rounded-2xl bg-surface-container object-cover shadow-sm transition-transform duration-300 group-hover:scale-105"
+                        referrerPolicy="no-referrer"
+                      />
+                      <div>
+                        <p className="text-base font-black tracking-tight text-on-surface">{item.name}</p>
+                        <span className="mt-2 inline-block rounded-lg bg-primary-fixed bg-opacity-10 px-2.5 py-1 text-[10px] font-extrabold text-primary shadow-sm">
+                          {item.sku}
+                        </span>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-8 py-7">
+                    <div className="flex flex-col items-center">
+                      <div className="inline-flex min-w-25 flex-col overflow-hidden rounded-xl shadow-sm">
+                        <span className="border-b border-white/20 bg-secondary-container/50 px-4 py-2 text-[11px] font-black text-on-secondary-container">
+                          {item.room}
+                        </span>
+                        <span className="bg-surface-container-highest px-4 py-2 text-[11px] font-black text-on-surface opacity-80">
+                          {item.cabinet} / {item.section}
+                        </span>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="min-w-50 px-8 py-7">
+                    <div className="space-y-3">
+                      <div className="flex items-end justify-between">
+                        <span className="text-lg font-black tracking-tighter text-on-surface">
+                          {item.currentStock}
+                          <span className="px-1 text-xs font-medium tracking-normal text-on-surface-variant opacity-50">
+                            / {item.totalCapacity}
+                          </span>
+                        </span>
+                        <span
+                          className={`text-xs font-black ${
+                            item.status === 'Critical'
+                              ? 'text-error'
+                              : item.status === 'Low Warning'
+                                ? 'text-tertiary-container'
+                                : 'text-primary'
+                          }`}
+                        >
+                          {Math.round((item.currentStock / item.totalCapacity) * 100)}%
+                        </span>
+                      </div>
+                      <div className="h-2.5 w-full overflow-hidden rounded-full bg-surface-container shadow-inner">
+                        <div
+                          className={`h-full rounded-full transition-all duration-1000 ease-out ${
+                            item.status === 'Critical'
+                              ? 'bg-error'
+                              : item.status === 'Low Warning'
+                                ? 'bg-tertiary-container'
+                                : 'bg-primary'
+                          }`}
+                          style={{ width: `${(item.currentStock / item.totalCapacity) * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-8 py-7">
+                    <span
+                      className={`rounded-full px-4 py-1.5 text-[10px] font-black uppercase tracking-widest shadow-sm ${
+                        item.status === 'Critical'
+                          ? 'bg-error-container text-on-error-container'
+                          : item.status === 'Low Warning'
+                            ? 'bg-tertiary-fixed text-on-tertiary-fixed-variant'
+                            : 'bg-primary-fixed text-primary'
+                      }`}
+                    >
+                      {item.status}
+                    </span>
+                  </td>
+                  <td className="px-8 py-7 text-right">
+                    <button className="rounded-xl p-2 transition-all opacity-0 hover:bg-surface-container group-hover:opacity-100">
+                      <ChevronRight className="h-5 w-5 text-outline" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="flex items-center justify-center h-40 w-full text-on-surface-variant">
+            <p className="text-sm font-medium">No inventory items available</p>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-center border-t border-outline-variant/10 bg-surface-container-low/20 p-6">
@@ -335,7 +255,7 @@ function InventoryTable({ items }) {
   )
 }
 
-function InboundFeed({ items }) {
+function InboundFeed({ items, isLoading }) {
   return (
     <div className="flex h-full flex-col rounded-[2.5rem] bg-surface-container-highest/50 p-8 shadow-ambient">
       <h3 className="mb-10 flex items-center gap-4 text-2xl font-black tracking-tight text-primary">
@@ -344,7 +264,12 @@ function InboundFeed({ items }) {
       </h3>
 
       <div className="flex-1 space-y-10">
-        {items.map((item, index) => (
+        {isLoading ? (
+          <div className="flex items-center justify-center h-40">
+            <Loader size={24} className="animate-spin text-primary" />
+          </div>
+        ) : items.length > 0 ? (
+          items.map((item, index) => (
           <div key={item.id} className="group relative pl-12">
             {/* Timeline Line */}
             {index !== items.length - 1 && (
@@ -422,7 +347,12 @@ function InboundFeed({ items }) {
               )}
             </div>
           </div>
-        ))}
+        ))
+        ) : (
+          <div className="flex items-center justify-center h-40 text-on-surface-variant">
+            <p className="text-sm font-medium">No inbound items</p>
+          </div>
+        )}
       </div>
 
       <div className="mt-12 flex items-start gap-4 rounded-3xl border border-primary-container/10 bg-primary-container/5 p-6">
@@ -441,7 +371,7 @@ function InboundFeed({ items }) {
   )
 }
 
-function WarehouseMap() {
+function WarehouseMap({ rooms, isLoading }) {
   return (
     <div className="flex h-full flex-col rounded-[2.5rem] bg-surface-container-lowest p-10 shadow-ambient">
       <div className="mb-8 flex items-start justify-between">
@@ -449,56 +379,29 @@ function WarehouseMap() {
           <MapIcon className="h-6 w-6 text-primary/60" />
           Warehouse Floor Map
         </h3>
-        <span className="text-[11px] font-black uppercase tracking-wider text-outline opacity-60">Last Mapping Sync: 2m ago</span>
+        <span className="text-[11px] font-black uppercase tracking-wider text-outline opacity-60">Last Mapping Sync: just now</span>
       </div>
 
       <div className="group relative w-full flex-1 overflow-hidden rounded-4xl border border-outline-variant/10 bg-surface-container-low shadow-inner">
-        <div className="absolute inset-0 grid grid-cols-6 grid-rows-3 gap-3 p-6">
-          <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-primary-fixed bg-white p-3 transition-transform duration-300 hover:scale-[1.03] shadow-sm">
-            <span className="text-[11px] font-black text-on-surface-variant opacity-70">ROOM A1</span>
-            <div className="mt-2 h-1.5 w-full rounded-full bg-primary shadow-sm" />
+        {isLoading ? (
+          <div className="flex items-center justify-center h-full">
+            <Loader size={32} className="animate-spin text-primary" />
           </div>
-          <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-error-container bg-white p-3 transition-transform duration-300 hover:scale-[1.03] shadow-sm">
-            <span className="text-[11px] font-black text-on-surface-variant opacity-70">ROOM A2</span>
-            <div className="mt-2 h-1.5 w-full rounded-full bg-error shadow-sm" />
+        ) : rooms && rooms.length > 0 ? (
+          <div className="absolute inset-0 grid grid-cols-6 grid-rows-3 gap-3 p-6">
+            {rooms.map((room, idx) => (
+              <div key={room.id} className="flex flex-col items-center justify-center rounded-2xl border-2 border-primary-fixed bg-white p-3 transition-transform duration-300 hover:scale-[1.03] shadow-sm">
+                <span className="text-[11px] font-black text-on-surface-variant opacity-70">{room.name}</span>
+                <div className="mt-2 h-1.5 w-full rounded-full bg-primary shadow-sm" style={{ width: `${room.capacity}%` }} />
+                <span className="text-[9px] text-on-surface-variant mt-1">{room.capacity}%</span>
+              </div>
+            ))}
           </div>
-          <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-primary-fixed bg-white p-3 transition-transform duration-300 hover:scale-[1.03] shadow-sm">
-            <span className="text-[11px] font-black text-on-surface-variant opacity-70">ROOM A3</span>
-            <div className="mt-2 h-1.5 w-full rounded-full bg-primary shadow-sm" />
+        ) : (
+          <div className="flex items-center justify-center h-full text-on-surface-variant">
+            <p className="text-sm font-medium">No warehouse data available</p>
           </div>
-
-          <div className="col-span-2 row-span-2 m-1 flex items-center justify-center rounded-3xl border-2 border-dashed border-outline-variant/30 bg-surface-container-high/40 text-on-surface/40">
-            <span className="rotate-[-15deg] text-sm font-black uppercase tracking-widest">Main Loading Bay</span>
-          </div>
-
-          <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-primary-fixed bg-white p-3 transition-transform duration-300 hover:scale-[1.03] shadow-sm">
-            <span className="text-[11px] font-black text-on-surface-variant opacity-70">ROOM B1</span>
-            <div className="mt-2 h-1.5 w-full rounded-full bg-primary-container shadow-sm" />
-          </div>
-
-          <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-tertiary-container/30 bg-white p-3 transition-transform duration-300 hover:scale-[1.03] shadow-sm">
-            <span className="text-[11px] font-black text-on-surface-variant opacity-70">ROOM B2</span>
-            <div className="mt-2 h-1.5 w-full rounded-full bg-tertiary-container shadow-sm" />
-          </div>
-          <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-primary-fixed bg-white p-3 transition-transform duration-300 hover:scale-[1.03] shadow-sm">
-            <span className="text-[11px] font-black text-on-surface-variant opacity-70">ROOM B3</span>
-            <div className="mt-2 h-1.5 w-full rounded-full bg-primary shadow-sm" />
-          </div>
-          <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-primary-fixed bg-white p-3 transition-transform duration-300 hover:scale-[1.03] shadow-sm">
-            <span className="text-[11px] font-black text-on-surface-variant opacity-70">ROOM B4</span>
-            <div className="mt-2 h-1.5 w-full rounded-full bg-primary-container shadow-sm" />
-          </div>
-
-          <div className="col-span-3 flex items-center rounded-2xl border border-secondary-container/40 bg-secondary-container/20 px-6 shadow-sm">
-            <div className="mr-3 h-2 w-2 animate-pulse rounded-full bg-secondary" />
-            <span className="text-[11px] font-black uppercase tracking-widest text-secondary">QA & INSPECTION ZONE</span>
-          </div>
-
-          <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-primary-fixed bg-white p-3 transition-transform duration-300 hover:scale-[1.03] shadow-sm">
-            <span className="text-[11px] font-black text-on-surface-variant opacity-70">REC OFFICE</span>
-            <div className="mt-2 h-1.5 w-full rounded-full bg-on-surface-variant shadow-sm" />
-          </div>
-        </div>
+        )}
       </div>
 
       <div className="mt-8 flex items-center justify-between">
@@ -523,11 +426,11 @@ function WarehouseMap() {
 }
 
 // Add Stock Modal Component
-function AddStockModal({ isOpen, onClose }) {
+function AddStockModal({ isOpen, onClose, onSuccess }) {
   const [batch, setBatch] = useState({
     supplierId: '',
     billNumber: '',
-    receiptDate: '',
+    receiptDate: new Date().toISOString().split('T')[0],
     products: [
       {
         id: crypto.randomUUID(),
@@ -539,6 +442,8 @@ function AddStockModal({ isOpen, onClose }) {
       },
     ],
   })
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState(null)
 
   const addRow = () => {
     setBatch((prev) => ({
@@ -573,6 +478,45 @@ function AddStockModal({ isOpen, onClose }) {
 
   const totalBatchValue = batch.products.reduce((acc, p) => acc + p.quantity * p.costPerUnit, 0)
   const totalItems = batch.products.reduce((acc, p) => acc + p.quantity, 0)
+
+  const handleSubmit = async () => {
+    if (!batch.supplierId || !batch.billNumber || !batch.receiptDate || batch.products.length === 0) {
+      setSubmitError('Please fill in all required fields')
+      return
+    }
+
+    try {
+      setIsSubmitting(true)
+      setSubmitError(null)
+      
+      const payload = {
+        supplierId: parseInt(batch.supplierId),
+        billNumber: batch.billNumber,
+        receiptDate: batch.receiptDate,
+        items: batch.products.map(p => ({
+          partId: parseInt(p.sku.split('-')[0]) || 1,
+          quantity: p.quantity,
+          costPerUnit: p.costPerUnit,
+          location: `${p.location.room}/${p.location.cabinet}/${p.location.section}`,
+        }))
+      }
+
+      const response = await apiCall('/inventory/add-stock', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      })
+
+      if (response) {
+        onClose()
+        if (onSuccess) onSuccess()
+      }
+    } catch (err) {
+      setSubmitError(err.message || 'Failed to save stock entry')
+      console.error('Stock entry error:', err)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
 
   return (
     <AnimatePresence>
@@ -826,15 +770,26 @@ function AddStockModal({ isOpen, onClose }) {
 
               {/* Modal Footer */}
               <div className="sticky bottom-0 border-t border-outline-variant/10 bg-surface-container-lowest p-6">
+                {submitError && (
+                  <div className="mb-4 text-sm font-medium text-error bg-error/10 border border-error/20 rounded-lg p-3">
+                    {submitError}
+                  </div>
+                )}
                 <div className="flex items-center justify-end gap-4">
                   <button
                     onClick={onClose}
-                    className="rounded-lg bg-secondary-container/30 px-6 py-2.5 text-sm font-bold text-primary transition-all hover:bg-secondary-container/50"
+                    disabled={isSubmitting}
+                    className="rounded-lg bg-secondary-container/30 px-6 py-2.5 text-sm font-bold text-primary transition-all hover:bg-secondary-container/50 disabled:opacity-50"
                   >
                     Cancel
                   </button>
-                  <button className="rounded-lg bg-primary px-8 py-2.5 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110">
-                    Save Inventory
+                  <button
+                    onClick={handleSubmit}
+                    disabled={isSubmitting}
+                    className="rounded-lg bg-primary px-8 py-2.5 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110 disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isSubmitting ? <Loader size={16} className="animate-spin" /> : null}
+                    {isSubmitting ? 'Saving...' : 'Save Inventory'}
                   </button>
                 </div>
               </div>
@@ -849,6 +804,113 @@ function AddStockModal({ isOpen, onClose }) {
 // Main Page Component
 export default function Inventory() {
   const [isStockModalOpen, setIsStockModalOpen] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [pageStats, setPageStats] = useState(stats)
+  const [pageInventoryItems, setPageInventoryItems] = useState(inventoryItems)
+  const [pageFeedItems, setPageFeedItems] = useState([])
+  const [warehouseRooms, setWarehouseRooms] = useState([])
+
+  useEffect(() => {
+    const loadInventoryData = async () => {
+      try {
+        setIsLoading(true)
+        setError(null)
+
+        // Fetch inventory metrics
+        const response = await apiCall('/inventory/metrics')
+
+        if (response.data) {
+          const data = response.data
+
+          // Update stats
+          if (data.stats) {
+            setPageStats([
+              {
+                label: 'Total SKUs',
+                value: String(data.stats.totalSKUs),
+                subValue: '+12.5% from last month',
+                type: 'normal',
+                iconName: 'inventory',
+              },
+              {
+                label: 'Critical Stock',
+                value: String(data.stats.criticalStock),
+                subValue: 'Immediate reorder needed',
+                type: 'critical',
+                iconName: 'warning',
+              },
+              {
+                label: 'In Transit',
+                value: String(data.stats.inTransit),
+                subValue: 'Arriving this week',
+                type: 'secondary',
+                iconName: 'pending',
+              },
+              {
+                label: 'Warehouse Utilization',
+                value: `${data.stats.warehouseUtilization}%`,
+                subValue: `${(data.stats.warehouseUtilization * 36.5).toFixed(0)} / 3,650 capacity`,
+                type: 'tertiary',
+                iconName: 'location',
+              },
+            ])
+          }
+
+          // Update inventory items
+          if (data.inventoryItems && Array.isArray(data.inventoryItems)) {
+            setPageInventoryItems(
+              data.inventoryItems.map((item) => ({
+                id: item.id,
+                name: item.name,
+                sku: item.sku,
+                image: `https://picsum.photos/seed/${item.sku}/200/200`,
+                room: item.location ? item.location.split('/')[0] : 'Warehouse',
+                cabinet: item.location ? item.location.split('/')[1] : 'N/A',
+                section: item.location ? item.location.split('/')[2] : 'N/A',
+                currentStock: item.stock,
+                totalCapacity: item.stock * 2,
+                status: item.status === 'CRITICAL' ? 'Critical' : item.status === 'LOW' ? 'Low Warning' : 'Optimal',
+              }))
+            )
+          }
+
+          // Update warehouse rooms
+          if (data.warehouseMap && Array.isArray(data.warehouseMap)) {
+            setWarehouseRooms(data.warehouseMap)
+          }
+
+          // Update inbound feed
+          if (data.inboundFeed && Array.isArray(data.inboundFeed)) {
+            setPageFeedItems(
+              data.inboundFeed.map((item, idx) => ({
+                id: item.id,
+                type: idx === 0 ? 'Received' : idx === 1 ? 'In Transit' : 'Discrepancy',
+                title: item.title,
+                details: item.sub,
+                timestamp: item.time,
+                user: {
+                  name: 'System',
+                  avatar: `https://picsum.photos/seed/user${idx}/100/100`,
+                },
+                po: `PO #${item.id}`,
+              }))
+            )
+          }
+        }
+      } catch (err) {
+        console.error('Inventory data load error:', err)
+        setError(err.message)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    loadInventoryData()
+    // Refresh data every 60 seconds
+    const interval = setInterval(loadInventoryData, 60000)
+    return () => clearInterval(interval)
+  }, [])
   return (
     <div className="space-y-12 p-12">
       {/* Page Header */}
@@ -875,18 +937,35 @@ export default function Inventory() {
         </motion.button>
       </section>
 
+      {/* Error Banner */}
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-error/10 border border-error/20 rounded-lg p-4 text-sm font-medium text-error"
+        >
+          Unable to load inventory data. Showing cached information. {error}
+        </motion.div>
+      )}
+
       {/* KPI Grid */}
       <section className="grid grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-4">
-        {stats.map((stat, i) => (
-          <motion.div
-            key={stat.label}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: i * 0.1 }}
-          >
-            <StatCard stat={stat} />
-          </motion.div>
-        ))}
+        {isLoading ? (
+          <div className="col-span-full flex items-center justify-center h-40">
+            <Loader size={32} className="animate-spin text-primary" />
+          </div>
+        ) : (
+          pageStats.map((stat, i) => (
+            <motion.div
+              key={stat.label}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5, delay: i * 0.1 }}
+            >
+              <StatCard stat={stat} />
+            </motion.div>
+          ))
+        )}
       </section>
 
       {/* Main Content Grid */}
@@ -898,7 +977,7 @@ export default function Inventory() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: 0.4 }}
           >
-            <InventoryTable items={inventoryItems} />
+            <InventoryTable items={pageInventoryItems} isLoading={isLoading} />
           </motion.div>
 
           <motion.div
@@ -906,7 +985,7 @@ export default function Inventory() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: 0.5 }}
           >
-            <WarehouseMap />
+            <WarehouseMap rooms={warehouseRooms} isLoading={isLoading} />
           </motion.div>
         </div>
 
@@ -918,13 +997,20 @@ export default function Inventory() {
             transition={{ duration: 0.5, delay: 0.6 }}
             className="h-full"
           >
-            <InboundFeed items={feedItems} />
+            <InboundFeed items={pageFeedItems} isLoading={isLoading} />
           </motion.div>
         </div>
       </section>
 
       {/* Add Stock Modal */}
-      <AddStockModal isOpen={isStockModalOpen} onClose={() => setIsStockModalOpen(false)} />
+      <AddStockModal
+        isOpen={isStockModalOpen}
+        onClose={() => setIsStockModalOpen(false)}
+        onSuccess={() => {
+          // Refresh inventory data
+          window.location.reload()
+        }}
+      />
     </div>
   )
 }

@@ -87,7 +87,7 @@ WHERE b.deleted_at IS NULL;
 CREATE OR REPLACE VIEW v_stock_from_bills AS
 SELECT
   se.id AS stock_entry_id,
-  se.product_id,
+  se.part_id,
   p.sku,
   p.name,
   se.location_id,
@@ -107,7 +107,7 @@ SELECT
   se.created_at,
   se.created_by
 FROM stock_entries se
-JOIN parts p ON se.product_id = p.id
+JOIN parts p ON se.part_id = p.id
 JOIN locations l ON se.location_id = l.id
 LEFT JOIN bills b ON (se.incoming_bill_id = b.id OR se.outgoing_bill_id = b.id)
 WHERE se.deleted_at IS NULL;
@@ -132,7 +132,7 @@ FROM bill_items bi
 JOIN bills b ON bi.bill_id = b.id
 JOIN parts p ON bi.part_id = p.id
 LEFT JOIN stock_entries se ON (
-  se.product_id = p.id
+  se.part_id = p.id
   AND se.quantity > 0
   AND se.outgoing_bill_id IS NULL
   AND se.deleted_at IS NULL
@@ -150,7 +150,7 @@ GROUP BY bi.id, bi.bill_id, b.bill_number, b.bill_type, b.bill_date,
 -- Function: Allocate stock to bill item (FIFO)
 CREATE OR REPLACE FUNCTION allocate_stock_to_bill_item(
   p_bill_item_id INTEGER,
-  p_product_id INTEGER,
+  p_part_id INTEGER,
   p_quantity INTEGER,
   p_location_id INTEGER DEFAULT NULL
 )
@@ -175,7 +175,7 @@ BEGIN
       unit_cost,
       location_id
     FROM stock_entries
-    WHERE product_id = p_product_id
+    WHERE part_id = p_part_id
       AND deleted_at IS NULL
       AND outgoing_bill_id IS NULL
       AND quantity > 0
@@ -317,7 +317,7 @@ BEGIN
   LOOP
     -- Create batch number
     INSERT INTO stock_entries (
-      product_id,
+      part_id,
       location_id,
       quantity,
       batch_number,
