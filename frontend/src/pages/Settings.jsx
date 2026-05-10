@@ -1,12 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
-  BarChart3,
-  Factory,
-  LayoutDashboard,
-  Plus,
-  MessageCircleQuestion,
-  LogOut,
-  Search,
   Bell,
   Info,
   User,
@@ -17,8 +10,13 @@ import {
   RotateCcw,
   MessageSquare,
   Smartphone,
+  Search,
+  Loader,
+  CheckCircle,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
+import { useAuth } from '../context/AuthContext'
+import { apiCall } from '../lib/apiClient'
 
 // Sub-components
 const TabButton = ({ active, onClick, icon: Icon, label }) => (
@@ -35,58 +33,35 @@ const TabButton = ({ active, onClick, icon: Icon, label }) => (
   </button>
 )
 
-const InputGroup = ({ label, value, type = 'text', disabled = false }) => (
-  <div className="space-y-2">
-    <label className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">{label}</label>
-    <input
-      type={type}
-      defaultValue={value}
-      disabled={disabled}
-      className={`w-full border-none rounded-xl px-4 py-3 focus:ring-2 focus:ring-primary/30 text-sm font-medium outline-none transition-all ${
-        disabled
-          ? 'bg-surface-container-high/40 text-on-surface-variant/60 cursor-not-allowed font-mono'
-          : 'bg-surface-container-low hover:bg-surface-container-low/80'
-      }`}
-    />
-  </div>
-)
-
 const ConfigRow = ({ label, value }) => (
   <div className="flex justify-between items-center bg-surface p-3.5 rounded-xl shadow-sm hover:shadow-md transition-shadow border border-outline-variant/10">
     <span className="text-sm font-bold text-on-surface">{label}</span>
-    <span className="text-[10px] font-mono bg-surface-container-high text-primary px-2.5 py-1.5 rounded-lg font-bold tracking-tight">
-      {value}
-    </span>
+    <span className="text-[10px] font-mono bg-surface-container-high text-primary px-2.5 py-1.5 rounded-lg font-bold tracking-tight">{value}</span>
   </div>
 )
 
-const ToggleRow = ({ icon: Icon, title, desc, color, bgColor, defaultChecked = false }) => {
-  const [checked, setChecked] = useState(defaultChecked)
-  return (
-    <div className="flex items-center justify-between p-4 bg-surface-container-low/50 hover:bg-surface-container-low rounded-xl transition-colors group border border-outline-variant/10">
-      <div className="flex items-center gap-4">
-        <div className={`w-10 h-10 ${bgColor} flex items-center justify-center rounded-xl group-hover:scale-110 transition-transform`}>
-          <Icon size={20} className={color} />
-        </div>
-        <div>
-          <p className="text-sm font-bold text-on-surface leading-tight">{title}</p>
-          <p className="text-[10px] text-on-surface-variant font-medium mt-0.5">{desc}</p>
-        </div>
+const ToggleRow = ({ icon: Icon, title, desc, color, bgColor, checked, onChange }) => (
+  <div className="flex items-center justify-between p-4 bg-surface-container-low/50 hover:bg-surface-container-low rounded-xl transition-colors group border border-outline-variant/10">
+    <div className="flex items-center gap-4">
+      <div className={`w-10 h-10 ${bgColor} flex items-center justify-center rounded-xl group-hover:scale-110 transition-transform`}>
+        <Icon size={20} className={color} />
       </div>
-      <button onClick={() => setChecked(!checked)} className="relative inline-flex items-center cursor-pointer">
-        <div className={`w-11 h-6 rounded-full transition-colors duration-200 outline-none ${checked ? 'bg-primary' : 'bg-outline-variant/50'}`}>
-          <div className={`absolute top-0.5 left-0.5 bg-white rounded-full h-5 w-5 transition-transform duration-200 shadow-sm ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
-        </div>
-      </button>
+      <div>
+        <p className="text-sm font-bold text-on-surface leading-tight">{title}</p>
+        <p className="text-[10px] text-on-surface-variant font-medium mt-0.5">{desc}</p>
+      </div>
     </div>
-  )
-}
+    <button onClick={() => onChange(!checked)} className="relative inline-flex items-center cursor-pointer">
+      <div className={`w-11 h-6 rounded-full transition-colors duration-200 outline-none ${checked ? 'bg-primary' : 'bg-outline-variant/50'}`}>
+        <div className={`absolute top-0.5 left-0.5 bg-white rounded-full h-5 w-5 transition-transform duration-200 shadow-sm ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
+      </div>
+    </button>
+  </div>
+)
 
 const SecurityStatusRow = ({ label, status, active = false }) => (
   <div className={`flex items-center justify-between p-4 rounded-xl border transition-all ${
-    active
-      ? 'bg-primary/10 border-primary/20'
-      : 'bg-surface-container/50 border-outline-variant/10'
+    active ? 'bg-primary/10 border-primary/20' : 'bg-surface-container/50 border-outline-variant/10'
   }`}>
     <span className="text-sm font-medium text-on-surface">{label}</span>
     <span className={`text-[10px] px-3 py-1 rounded-full font-bold uppercase tracking-widest ${
@@ -98,8 +73,70 @@ const SecurityStatusRow = ({ label, status, active = false }) => (
 )
 
 export default function Settings() {
+  const { user } = useAuth()
   const [activeTab, setActiveTab] = useState('Profile')
   const [searchQuery, setSearchQuery] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveSuccess, setSaveSuccess] = useState(false)
+  const [error, setError] = useState(null)
+
+  // Profile form state
+  const [displayName, setDisplayName] = useState('')
+  const [whatsappAlerts, setWhatsappAlerts] = useState(true)
+  const [smsNotifications, setSmsNotifications] = useState(false)
+  const [isDark, setIsDark] = useState(false)
+  const [autoTax, setAutoTax] = useState(true)
+  const [pdfSignature, setPdfSignature] = useState(false)
+  const [stationId, setStationId] = useState('')
+
+  const loadSettings = async () => {
+    try {
+      setIsLoading(true)
+      setError(null)
+      const response = await apiCall('/settings')
+      if (response.settings) {
+        const s = response.settings
+        setDisplayName(s.display_name || user?.name || '')
+        setStationId(s.station_id || '')
+        setIsDark(s.is_dark || false)
+        setAutoTax(s.auto_tax_enabled !== false)
+        setPdfSignature(s.pdf_signature_enabled || false)
+      }
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadSettings()
+  }, [])
+
+  const handleSave = async () => {
+    try {
+      setIsSaving(true)
+      setError(null)
+      await apiCall('/settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          displayName: displayName || undefined,
+          isDark,
+          autoTaxEnabled: autoTax,
+          pdfSignatureEnabled: pdfSignature,
+        }),
+      })
+      setSaveSuccess(true)
+      setTimeout(() => setSaveSuccess(false), 3000)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const avatarSeed = encodeURIComponent(user?.name || 'default')
 
   return (
     <div className="flex-1 flex flex-col h-screen bg-background overflow-hidden">
@@ -129,11 +166,11 @@ export default function Settings() {
           <div className="h-8 w-px bg-outline-variant/30" />
           <div className="flex items-center gap-4">
             <div className="text-right">
-              <p className="text-sm font-bold leading-none text-on-surface">Alexander Vance</p>
-              <p className="text-[10px] text-on-surface-variant font-medium mt-1 uppercase tracking-widest">System Admin</p>
+              <p className="text-sm font-bold leading-none text-on-surface">{user?.name || 'User'}</p>
+              <p className="text-[10px] text-on-surface-variant font-medium mt-1 uppercase tracking-widest">{user?.role || 'Staff'}</p>
             </div>
             <img
-              src="https://picsum.photos/seed/vance/128/128"
+              src={`https://picsum.photos/seed/${avatarSeed}/128/128`}
               alt="Profile"
               className="w-10 h-10 rounded-full border-2 border-primary object-cover shadow-sm"
               referrerPolicy="no-referrer"
@@ -152,30 +189,29 @@ export default function Settings() {
             </p>
           </motion.div>
 
+          {/* Error Banner */}
+          {error && (
+            <div className="mb-6 rounded-xl bg-error/10 border border-error/20 p-4 text-sm font-medium text-error">{error}</div>
+          )}
+
           {/* Settings Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
             {/* Tab Navigation */}
             <nav className="lg:col-span-3 flex flex-col gap-2">
               <TabButton active={activeTab === 'Profile'} onClick={() => setActiveTab('Profile')} icon={User} label="Profile" />
-              <TabButton
-                active={activeTab === 'Configuration'}
-                onClick={() => setActiveTab('Configuration')}
-                icon={Sliders}
-                label="Configuration"
-              />
-              <TabButton
-                active={activeTab === 'Notifications'}
-                onClick={() => setActiveTab('Notifications')}
-                icon={BellRing}
-                label="Notifications"
-              />
+              <TabButton active={activeTab === 'Configuration'} onClick={() => setActiveTab('Configuration')} icon={Sliders} label="Configuration" />
+              <TabButton active={activeTab === 'Notifications'} onClick={() => setActiveTab('Notifications')} icon={BellRing} label="Notifications" />
               <TabButton active={activeTab === 'Security'} onClick={() => setActiveTab('Security')} icon={ShieldCheck} label="Security" />
             </nav>
 
             {/* Content Grid */}
             <div className="lg:col-span-9 grid grid-cols-1 lg:grid-cols-6 gap-6">
               <AnimatePresence mode="wait">
-                {activeTab === 'Profile' && (
+                {isLoading ? (
+                  <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="col-span-full flex items-center justify-center h-64">
+                    <Loader size={32} className="animate-spin text-primary" />
+                  </motion.div>
+                ) : activeTab === 'Profile' && (
                   <motion.div
                     key="profile"
                     initial={{ opacity: 0, scale: 0.98 }}
@@ -188,16 +224,32 @@ export default function Settings() {
                     <div className="lg:col-span-4 bg-surface-container-lowest rounded-2xl p-8 shadow-ambient border border-outline-variant/10">
                       <h3 className="text-lg font-black mb-8 text-on-surface tracking-tight">Administrative Profile</h3>
                       <div className="grid grid-cols-2 gap-6">
-                        <InputGroup label="Full Legal Name" value="Alexander Vance" />
-                        <InputGroup label="Operational ID" value="AV-992-KIN" disabled />
-                        <div className="col-span-2">
-                          <InputGroup label="Email Address" value="vance.a@kinetic-archive.com" type="email" />
+                        <div className="space-y-2">
+                          <label className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">Display Name</label>
+                          <input
+                            type="text"
+                            value={displayName}
+                            onChange={(e) => setDisplayName(e.target.value)}
+                            placeholder="Your display name"
+                            className="w-full bg-surface-container-low border-none rounded-xl px-4 py-3 focus:ring-2 focus:ring-primary/30 text-sm font-medium outline-none transition-all hover:bg-surface-container-low/80"
+                          />
                         </div>
-                        <div className="col-span-2 pt-2">
-                          <label className="text-xs font-bold text-on-surface-variant uppercase tracking-widest block mb-2">Bio / Notes</label>
-                          <textarea
-                            className="w-full bg-surface-container-low border-none rounded-xl px-4 py-3 focus:ring-2 focus:ring-primary/30 text-sm font-medium outline-none transition-all min-h-25"
-                            defaultValue="Senior operations manager specializing in supply chain logistics for high-precision automotive components."
+                        <div className="space-y-2">
+                          <label className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">Operational ID</label>
+                          <input
+                            type="text"
+                            value={stationId}
+                            disabled
+                            className="w-full border-none rounded-xl px-4 py-3 focus:ring-2 focus:ring-primary/30 text-sm font-medium outline-none transition-all bg-surface-container-high/40 text-on-surface-variant/60 cursor-not-allowed font-mono"
+                          />
+                        </div>
+                        <div className="col-span-2 space-y-2">
+                          <label className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">Email Address</label>
+                          <input
+                            type="email"
+                            value={user?.email || ''}
+                            disabled
+                            className="w-full border-none rounded-xl px-4 py-3 text-sm font-medium outline-none bg-surface-container-high/40 text-on-surface-variant/60 cursor-not-allowed"
                           />
                         </div>
                       </div>
@@ -233,7 +285,8 @@ export default function Settings() {
                           desc="Direct logistics updates"
                           color="text-[#25D366]"
                           bgColor="bg-[#25D366]/10"
-                          defaultChecked
+                          checked={whatsappAlerts}
+                          onChange={setWhatsappAlerts}
                         />
                         <ToggleRow
                           icon={Smartphone}
@@ -241,6 +294,8 @@ export default function Settings() {
                           desc="Critical system failures"
                           color="text-primary"
                           bgColor="bg-primary/10"
+                          checked={smsNotifications}
+                          onChange={setSmsNotifications}
                         />
                       </div>
                     </div>
@@ -270,7 +325,40 @@ export default function Settings() {
                   </motion.div>
                 )}
 
-                {activeTab !== 'Profile' && (
+                {!isLoading && activeTab === 'Configuration' && (
+                  <motion.div
+                    key="configuration"
+                    initial={{ opacity: 0, scale: 0.98 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.98 }}
+                    transition={{ duration: 0.2 }}
+                    className="col-span-full bg-surface-container-lowest rounded-2xl p-8 border border-outline-variant/10"
+                  >
+                    <h3 className="text-lg font-black mb-8 text-on-surface tracking-tight">System Configuration</h3>
+                    <div className="space-y-6 max-w-lg">
+                      <ToggleRow
+                        icon={Sliders}
+                        title="Auto Tax Calculation"
+                        desc="Automatically apply tax to new bills"
+                        color="text-primary"
+                        bgColor="bg-primary/10"
+                        checked={autoTax}
+                        onChange={setAutoTax}
+                      />
+                      <ToggleRow
+                        icon={ShieldCheck}
+                        title="PDF Signature Required"
+                        desc="Require digital signature on PDF exports"
+                        color="text-secondary"
+                        bgColor="bg-secondary/10"
+                        checked={pdfSignature}
+                        onChange={setPdfSignature}
+                      />
+                    </div>
+                  </motion.div>
+                )}
+
+                {!isLoading && activeTab !== 'Profile' && activeTab !== 'Configuration' && (
                   <motion.div
                     key="coming-soon"
                     initial={{ opacity: 0, y: 10 }}
@@ -286,11 +374,25 @@ export default function Settings() {
 
               {/* Action Footer */}
               <div className="lg:col-span-6 mt-4 flex items-center justify-end gap-5 p-6 bg-surface-container-high/40 rounded-2xl border border-outline-variant/10 backdrop-blur-sm">
-                <button className="px-8 py-3 text-on-surface-variant font-bold text-sm hover:text-on-surface transition-colors active:scale-95">
+                {saveSuccess && (
+                  <div className="flex items-center gap-2 text-sm font-bold text-primary">
+                    <CheckCircle size={16} /> Settings saved successfully!
+                  </div>
+                )}
+                <button
+                  onClick={loadSettings}
+                  disabled={isLoading || isSaving}
+                  className="px-8 py-3 text-on-surface-variant font-bold text-sm hover:text-on-surface transition-colors active:scale-95"
+                >
                   Discard Changes
                 </button>
-                <button className="bg-linear-to-b from-primary to-primary-container px-12 py-3 text-white font-bold text-sm rounded-xl shadow-xl shadow-primary/20 active:scale-[0.98] transition-all hover:shadow-primary/30">
-                  Save System State
+                <button
+                  onClick={handleSave}
+                  disabled={isSaving || isLoading}
+                  className="bg-linear-to-b from-primary to-primary-container px-12 py-3 text-white font-bold text-sm rounded-xl shadow-xl shadow-primary/20 active:scale-[0.98] transition-all hover:shadow-primary/30 disabled:opacity-60 flex items-center gap-2"
+                >
+                  {isSaving ? <Loader size={14} className="animate-spin" /> : null}
+                  {isSaving ? 'Saving...' : 'Save System State'}
                 </button>
               </div>
             </div>

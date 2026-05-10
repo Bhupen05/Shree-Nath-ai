@@ -1927,6 +1927,49 @@ app.get('/api/suppliers/metrics', requireAuth, requirePermission('customers:read
   }
 });
 
+app.post('/api/suppliers', requireAuth, requirePermission('customers:write'), async (req, res) => {
+  const { name, contactPerson, phone, email, address, category, status } = req.body || {};
+
+  if (!name || !phone || !email) {
+    return res.status(400).json({ message: 'name, phone, and email are required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO suppliers (name, contact_person, phone, email, address, category, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, name, contact_person, phone, email, address, category, status, created_at
+      `,
+      [
+        String(name).trim(),
+        contactPerson ? String(contactPerson).trim() : null,
+        String(phone).trim(),
+        String(email).trim().toLowerCase(),
+        address ? String(address).trim() : null,
+        category ? String(category).trim() : 'General',
+        status ? String(status).trim() : 'Active',
+      ]
+    );
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'SUPPLIER_CREATED',
+      entityType: 'supplier',
+      entityId: result.rows[0].id,
+      newValue: { name, phone, email, category },
+      ipAddress: req.ip,
+    });
+
+    return res.status(201).json({ message: 'Supplier created successfully', supplier: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ message: 'A supplier with this phone or email already exists' });
+    }
+    return res.status(500).json({ message: 'Unable to create supplier', error: error.message });
+  }
+});
+
 app.get('/api/reports/metrics', requireAuth, requirePermission('billing:read'), async (_req, res) => {
   try {
     // Get report generation stats

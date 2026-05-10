@@ -11,69 +11,80 @@ import {
   ChevronRight,
   Users,
   Loader,
+  RefreshCw,
 } from 'lucide-react'
 import { motion } from 'motion/react'
-
-// API Configuration
-const API_BASE = 'http://localhost:5000/api'
-
-async function apiCall(endpoint, options = {}) {
-  const token = localStorage.getItem('auth_token')
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(token && { Authorization: `Bearer ${token}` }),
-    ...options.headers,
-  }
-
-  try {
-    const response = await fetch(`${API_BASE}${endpoint}`, {
-      ...options,
-      headers,
-    })
-
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`)
-    }
-
-    return await response.json()
-  } catch (err) {
-    console.error(`API call failed for ${endpoint}:`, err)
-    throw err
-  }
-}
-
-function getAuthToken() {
-  return localStorage.getItem('auth_token')
-}
-
-const tableData = []
+import { apiCall } from '../lib/apiClient'
 
 export default function Reports() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState(null)
   const [reports, setReports] = useState([])
+  const [stockValue, setStockValue] = useState('—')
+  const [dateFrom, setDateFrom] = useState(new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0])
+  const [dateTo, setDateTo] = useState(new Date().toISOString().split('T')[0])
+
+  const loadReportsData = async () => {
+    try {
+      setIsLoading(true)
+      setError(null)
+      const response = await apiCall('/reports/metrics')
+      if (response.data) {
+        setReports(response.data.reports || [])
+      }
+    } catch (err) {
+      console.error('Error loading reports data:', err)
+      setError(err.message)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Load dashboard metrics for the stock value figure
+  const loadStockValue = async () => {
+    try {
+      const response = await apiCall('/dashboard/metrics')
+      if (response.data?.metrics?.totalStockValue) {
+        setStockValue(response.data.metrics.totalStockValue)
+      }
+    } catch {
+      // silently fail
+    }
+  }
 
   useEffect(() => {
-    const loadReportsData = async () => {
-      try {
-        setIsLoading(true)
-        const response = await apiCall('/reports/metrics')
-        
-        if (response.data) {
-          setReports(response.data.reports || [])
-        }
-      } catch (err) {
-        console.error('Error loading reports data:', err)
-        setError(err.message)
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
     loadReportsData()
-    const interval = setInterval(loadReportsData, 60000) // Refresh every 60 seconds
+    loadStockValue()
+    const interval = setInterval(loadReportsData, 60000)
     return () => clearInterval(interval)
   }, [])
+
+  const handleExportCSV = async () => {
+    try {
+      const token = localStorage.getItem('auth_token')
+      const response = await fetch(`http://localhost:5000/api/billing/bills?billType=SALE`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) throw new Error('Export failed')
+      const data = await response.json()
+      const rows = data.items || []
+      if (rows.length === 0) {
+        alert('No data to export.')
+        return
+      }
+      const headers = Object.keys(rows[0]).join(',')
+      const csv = [headers, ...rows.map((r) => Object.values(r).join(','))].join('\n')
+      const blob = new Blob([csv], { type: 'text/csv' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `sales_report_${dateFrom}_${dateTo}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      alert('Export failed: ' + err.message)
+    }
+  }
 
   return (
     <div className="flex-1 p-8 overflow-y-auto space-y-12">
@@ -86,14 +97,18 @@ export default function Reports() {
         </nav>
         <h1 className="text-5xl font-black text-on-surface tracking-tighter">System Performance & Reporting</h1>
         <p className="text-on-surface-variant text-sm mt-3 max-w-2xl">
-          Generate authoritative data exports from the kinetic ledger. ({reports.length} reports available)
+          Generate authoritative data exports from the kinetic ledger.{' '}
+          {!isLoading && `(${reports.length} reports available)`}
         </p>
       </motion.div>
 
       {/* Error Banner */}
       {error && (
-        <div className="rounded-2xl bg-error-container/10 border border-error/20 p-4 text-on-error-container">
-          <p className="text-sm font-medium">Unable to load reports data. Showing cached data.</p>
+        <div className="rounded-2xl bg-error-container/10 border border-error/20 p-4 text-on-error-container flex items-center justify-between">
+          <p className="text-sm font-medium">⚠️ Unable to load reports data. {error}</p>
+          <button onClick={loadReportsData} className="text-primary font-bold text-sm hover:underline flex items-center gap-1">
+            <RefreshCw size={14} /> Retry
+          </button>
         </div>
       )}
 
@@ -131,7 +146,7 @@ export default function Reports() {
             </div>
             <div className="text-right">
               <p className="text-[10px] text-on-surface-variant font-black uppercase tracking-widest">Estimated Value</p>
-              <p className="text-4xl font-black text-on-surface tracking-tighter">$4.2M</p>
+              <p className="text-4xl font-black text-on-surface tracking-tighter">{stockValue}</p>
             </div>
           </div>
 
@@ -143,13 +158,15 @@ export default function Reports() {
               <div className="flex gap-2">
                 <input
                   type="date"
+                  value={dateFrom}
+                  onChange={(e) => setDateFrom(e.target.value)}
                   className="bg-surface border-none rounded-lg text-xs font-medium focus:ring-2 focus:ring-primary/30 w-full py-2.5 px-3 outline-none"
-                  defaultValue="2026-04-01"
                 />
                 <input
                   type="date"
+                  value={dateTo}
+                  onChange={(e) => setDateTo(e.target.value)}
                   className="bg-surface border-none rounded-lg text-xs font-medium focus:ring-2 focus:ring-primary/30 w-full py-2.5 px-3 outline-none"
-                  defaultValue="2026-04-30"
                 />
               </div>
             </div>
@@ -157,14 +174,17 @@ export default function Reports() {
               <button className="flex-1 sm:flex-initial bg-surface-container hover:bg-surface-container-high text-on-surface py-2.5 px-6 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2">
                 <FileText className="w-4 h-4" /> PDF
               </button>
-              <button className="flex-1 sm:flex-initial bg-linear-to-b from-primary to-primary-container text-white py-2.5 px-8 rounded-lg text-xs font-bold shadow-lg shadow-primary/20 hover:brightness-110 transition-all flex items-center justify-center gap-2">
+              <button
+                onClick={handleExportCSV}
+                className="flex-1 sm:flex-initial bg-linear-to-b from-primary to-primary-container text-white py-2.5 px-8 rounded-lg text-xs font-bold shadow-lg shadow-primary/20 hover:brightness-110 transition-all flex items-center justify-center gap-2"
+              >
                 <Table className="w-4 h-4" /> Export CSV
               </button>
             </div>
           </div>
         </motion.div>
 
-        {/* Sales Summary (Tall) */}
+        {/* Sales Summary */}
         <motion.div
           initial={{ opacity: 0, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -180,28 +200,22 @@ export default function Reports() {
             <p className="text-on-surface-variant text-sm mt-3">
               Aggregate transaction analysis including gross margins and tax collection totals.
             </p>
-
             <div className="mt-8 p-4 bg-surface rounded-xl border border-outline-variant/10">
               <div className="flex justify-between items-center mb-3">
                 <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">Q2 Target</span>
                 <span className="text-xs font-black text-primary">82%</span>
               </div>
               <div className="w-full bg-surface-container h-2.5 rounded-full overflow-hidden">
-                <motion.div
-                  initial={{ width: 0 }}
-                  animate={{ width: '82%' }}
-                  transition={{ duration: 1, delay: 0.5 }}
-                  className="bg-primary h-full rounded-full"
-                />
+                <motion.div initial={{ width: 0 }} animate={{ width: '82%' }} transition={{ duration: 1, delay: 0.5 }} className="bg-primary h-full rounded-full" />
               </div>
             </div>
           </div>
-
           <div className="mt-8 pt-6 border-t border-outline-variant/10">
-            <label className="text-[10px] font-bold uppercase text-on-surface-variant mb-3 block tracking-widest">
-              Quick Export
-            </label>
-            <button className="w-full border-2 border-primary/20 text-primary hover:bg-primary/5 py-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2">
+            <label className="text-[10px] font-bold uppercase text-on-surface-variant mb-3 block tracking-widest">Quick Export</label>
+            <button
+              onClick={handleExportCSV}
+              className="w-full border-2 border-primary/20 text-primary hover:bg-primary/5 py-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2"
+            >
               <Download className="w-4 h-4" /> Download Monthly Report
             </button>
           </div>
@@ -294,37 +308,24 @@ export default function Reports() {
                       <td className="px-8 py-5 font-bold text-on-surface">{item.name}</td>
                       <td className="px-8 py-5 text-on-surface-variant">{item.generatedBy || 'System'}</td>
                       <td className="px-8 py-5">
-                        <span
-                          className={`px-3 py-1.5 rounded-lg font-black uppercase text-[9px] shadow-sm ${
-                            item.format === 'CSV'
-                              ? 'bg-primary/10 text-primary'
-                              : item.format === 'PDF'
-                              ? 'bg-error/10 text-error'
-                              : 'bg-secondary/10 text-secondary'
-                          }`}
-                        >
+                        <span className={`px-3 py-1.5 rounded-lg font-black uppercase text-[9px] shadow-sm ${
+                          item.format === 'CSV' ? 'bg-primary/10 text-primary'
+                          : item.format === 'PDF' ? 'bg-error/10 text-error'
+                          : 'bg-secondary/10 text-secondary'
+                        }`}>
                           {item.format}
                         </span>
                       </td>
                       <td className="px-8 py-5">
                         <span className={`flex items-center gap-2 font-bold ${item.status === 'Processing' ? 'text-on-surface-variant' : 'text-primary'}`}>
-                          <div
-                            className={`w-2 h-2 rounded-full ${
-                              item.status === 'Processing'
-                                ? 'bg-on-surface-variant animate-pulse'
-                                : 'bg-primary'
-                            }`}
-                          />
+                          <div className={`w-2 h-2 rounded-full ${item.status === 'Processing' ? 'bg-on-surface-variant animate-pulse' : 'bg-primary'}`} />
                           {item.status}
                         </span>
                       </td>
                       <td className="px-8 py-5 text-right">
                         <button
-                          className={`font-bold transition-all ${
-                            item.status === 'Processing'
-                              ? 'text-on-surface-variant cursor-not-allowed opacity-50'
-                              : 'text-primary hover:underline underline-offset-2'
-                          }`}
+                          onClick={() => item.status !== 'Processing' && handleExportCSV()}
+                          className={`font-bold transition-all ${item.status === 'Processing' ? 'text-on-surface-variant cursor-not-allowed opacity-50' : 'text-primary hover:underline underline-offset-2'}`}
                           disabled={item.status === 'Processing'}
                         >
                           {item.status === 'Processing' ? 'Processing...' : 'Download'}
@@ -335,8 +336,9 @@ export default function Reports() {
                 </tbody>
               </table>
             ) : (
-              <div className="flex items-center justify-center h-64 w-full text-on-surface-variant">
-                <p className="text-sm font-medium">No reports available</p>
+              <div className="flex flex-col items-center justify-center h-64 w-full text-on-surface-variant gap-3">
+                <Archive size={32} className="opacity-30" />
+                <p className="text-sm font-medium">No reports available yet</p>
               </div>
             )}
           </div>

@@ -25,41 +25,10 @@ import {
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
 
-// API Configuration
-const API_BASE = 'http://localhost:5000/api'
+import { apiCall } from '../lib/apiClient'
 
-async function apiCall(endpoint, options = {}) {
-  const token = localStorage.getItem('auth_token')
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(token && { Authorization: `Bearer ${token}` }),
-    ...options.headers,
-  }
-
-  try {
-    const response = await fetch(`${API_BASE}${endpoint}`, {
-      ...options,
-      headers,
-    })
-
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`)
-    }
-
-    return await response.json()
-  } catch (err) {
-    console.error(`API call failed for ${endpoint}:`, err)
-    throw err
-  }
-}
-
-function getAuthToken() {
-  return localStorage.getItem('auth_token')
-}
-
-// Mock Data - Will be fetched from API
+// Will be fetched from API
 const BILLING_DATA = []
-
 const CASH_FLOW_DATA = []
 
 // Components
@@ -117,17 +86,19 @@ function CreatePurchaseBillModal({ isOpen, onClose, onSuccess }) {
       const payload = {
         partyId: parseInt(supplierId),
         billType: 'PURCHASE',
+        partyType: 'SUPPLIER',
         billNumber: billRef,
         billDate: purchaseDate,
-        total: items.reduce((acc, item) => acc + item.quantity * item.unitPrice, 0) + shipping,
+        tax: tax,
+        discount: 0,
         items: items.map(item => ({
-          partId: parseInt(item.sku.split('-')[0]) || 1,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
+          partId: parseInt(item.id) || 1,
+          quantity: parseInt(item.quantity) || 1,
+          unitPrice: parseFloat(item.unitPrice) || 0,
         }))
       }
 
-      const response = await apiCall('/billing/create-bill', {
+      const response = await apiCall('/billing/bills', {
         method: 'POST',
         body: JSON.stringify(payload)
       })
@@ -1042,24 +1013,24 @@ export default function Billing() {
                   <tr key={row.id} className="transition-colors hover:bg-surface-container-low/20 group">
                     <td className="px-6 py-5">
                       <span className="rounded-lg bg-primary/5 px-2.5 py-1 font-mono text-[11px] font-bold text-primary">
-                        {row.referenceNumber}
+                        {row.billNumber}
                       </span>
                     </td>
                     <td className="px-6 py-5">
                       <div className="flex items-center space-x-3">
                         <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-surface-container text-[11px] font-black text-on-surface-variant ring-1 ring-outline-variant/10">
-                          {row.party?.name?.substring(0, 2).toUpperCase() || 'N/A'}
+                          {(row.party || 'NA').substring(0, 2).toUpperCase()}
                         </div>
                         <div>
-                          <p className="leading-tight font-bold text-on-surface">{row.party?.name || 'Unknown'}</p>
-                          <p className="mt-0.5 text-[10px] font-medium text-on-surface-variant">{row.party?.type || 'Entity'}</p>
+                          <p className="leading-tight font-bold text-on-surface">{row.party || 'Unknown'}</p>
+                          <p className="mt-0.5 text-[10px] font-medium text-on-surface-variant">{row.items ? `${row.items} items` : 'Entity'}</p>
                         </div>
                       </div>
                     </td>
-                    <td className="px-6 py-5 font-medium text-on-surface-variant">{new Date(row.date).toLocaleDateString()}</td>
-                    <td className="px-6 py-5 text-right font-black text-on-surface">${row.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                    <td className="px-6 py-5 font-medium text-on-surface-variant">{row.date}</td>
+                    <td className="px-6 py-5 text-right font-black text-on-surface">{row.amount}</td>
                     <td className="px-6 py-5">
-                      <StatusChip status={row.status} />
+                      <StatusChip status={row.status?.charAt(0) + row.status?.slice(1).toLowerCase()} />
                     </td>
                     <td className="px-6 py-5 text-right">
                       <button className="rounded-lg p-1 transition-opacity opacity-40 hover:bg-surface-container hover:opacity-100">

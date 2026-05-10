@@ -27,37 +27,13 @@ import {
   X,
   Loader,
 } from 'lucide-react'
+import { apiCall } from '../lib/apiClient'
 
 const cn = (...classes) => classes.filter(Boolean).join(' ')
 
-// API Configuration
-const API_BASE = 'http://localhost:5000/api'
-const getAuthToken = () => localStorage.getItem('auth_token')
-
-// API Utility Functions
-const apiCall = async (endpoint, options = {}) => {
-	const token = getAuthToken()
-	const response = await fetch(`${API_BASE}${endpoint}`, {
-		...options,
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`,
-			...options.headers,
-		},
-	})
-
-	if (!response.ok) {
-		throw new Error(`API Error: ${response.statusText}`)
-	}
-
-	return response.json()
-}
-
-// Mock data for fallback
-let stats = []
-
-let inventoryItems = []
-
+// Static state defaults (no hardcoded data)
+const stats = []
+const inventoryItems = []
 const feedItems = []
 
 // Components
